@@ -36,6 +36,8 @@ pub enum Action {
     Launch(Launch),
     Resize(u16, u16),
     Quit,
+    /// the programs you added changed: rebuild the menu and desktop
+    Refresh,
     Many(Vec<Action>),
 }
 

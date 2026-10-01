@@ -157,7 +157,7 @@ enum TaskHit {
 
 struct DeskIcon {
     icon: Icon,
-    label: &'static str,
+    label: String,
     launch: Launch,
 }
 
@@ -183,6 +183,8 @@ pub struct Desktop {
     pub quit: bool,
     docs: Vec<PathBuf>,
     clock: String,
+    /// the programs you added: name, command, icon
+    mine: Vec<(String, String, Icon)>,
 }
 
 /// A text web browser to open in a window, if one is installed.
@@ -214,24 +216,7 @@ const FIND: &str = r#"printf 'Named: '; read -r q; [ -n "" ] && find ~ -iname "*
 
 impl Desktop {
     pub fn new(w: u16, h: u16, lite: bool) -> Desktop {
-        let mut icons = vec![
-            DeskIcon { icon: Icon::Computer, label: "Computer", launch: Launch::Explorer(PathBuf::from("/")) },
-            DeskIcon { icon: Icon::Folder, label: "Home", launch: Launch::Explorer(home()) },
-            DeskIcon { icon: Icon::Terminal, label: "Terminal", launch: Launch::shell("Terminal", Icon::Terminal, None) },
-            DeskIcon { icon: Icon::Notepad, label: "Notes", launch: Launch::Notepad(None) },
-            DeskIcon { icon: Icon::Mines, label: "Mines", launch: Launch::Mines },
-        ];
-        if has("btop") {
-            icons.push(DeskIcon { icon: Icon::Monitor, label: "Monitor", launch: Launch::shell("Monitor", Icon::Monitor, Some("btop")) });
-        }
-        if let Some(b) = browser() {
-            icons.push(DeskIcon { icon: Icon::Web, label: "Web", launch: Launch::shell("Web", Icon::Web, Some(&b)) });
-        }
-        if has("lazygit") {
-            icons.push(DeskIcon { icon: Icon::Git, label: "Git", launch: Launch::shell("Git", Icon::Git, Some("lazygit")) });
-        }
-        icons.push(DeskIcon { icon: Icon::Recycle, label: "Trash", launch: Launch::Explorer(home().join(".local/share/Trash/files")) });
-        Desktop {
+        let mut d = Desktop {
             th: Theme::load(lite),
             lite,
             theme_mtime: theme::mtime(),
@@ -245,14 +230,51 @@ impl Desktop {
             drag: Drag::None,
             snap: None,
             hover: None,
-            icons,
+            icons: vec![],
             sel_icon: None,
             last_click: None,
             kbmode: None,
             quit: false,
             docs: vec![],
             clock: clock(),
+            mine: vec![],
+        };
+        d.refresh_programs();
+        d
+    }
+
+    /// Reads the programs you added and lays out the desktop icons again.
+    fn refresh_programs(&mut self) {
+        self.mine = crate::programs::load()
+            .into_iter()
+            .map(|(name, cmd)| {
+                let icon = crate::programs::icon(&name).map(|r| crate::icons::custom(&r)).unwrap_or(Icon::Run);
+                (name, cmd, icon)
+            })
+            .collect();
+        let d = |icon: Icon, label: &str, launch: Launch| DeskIcon { icon, label: label.into(), launch };
+        let mut icons = vec![
+            d(Icon::Computer, "Computer", Launch::Explorer(PathBuf::from("/"))),
+            d(Icon::Folder, "Home", Launch::Explorer(home())),
+            d(Icon::Terminal, "Terminal", Launch::shell("Terminal", Icon::Terminal, None)),
+            d(Icon::Notepad, "Notes", Launch::Notepad(None)),
+            d(Icon::Mines, "Mines", Launch::Mines),
+        ];
+        if has("btop") {
+            icons.push(d(Icon::Monitor, "Monitor", Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
         }
+        if let Some(b) = browser() {
+            icons.push(d(Icon::Web, "Web", Launch::shell("Web", Icon::Web, Some(&b))));
+        }
+        if has("lazygit") {
+            icons.push(d(Icon::Git, "Git", Launch::shell("Git", Icon::Git, Some("lazygit"))));
+        }
+        for (name, cmd, icon) in &self.mine {
+            icons.push(d(*icon, name, Launch::shell(name, *icon, Some(cmd))));
+        }
+        icons.push(d(Icon::Recycle, "Trash", Launch::Explorer(home().join(".local/share/Trash/files"))));
+        self.icons = icons;
+        self.sel_icon = None;
     }
 
     fn work_h(&self) -> i32 {
@@ -490,6 +512,7 @@ impl Desktop {
                     w.sync();
                 }
             }
+            Action::Refresh => self.refresh_programs(),
             Action::Quit => {
                 self.wins.clear();
                 self.menu = None;
@@ -525,18 +548,10 @@ impl Desktop {
             progs.push(Item::new("Vim", shell("Vim", Icon::Vim, Some("nvim"))).icon(Icon::Vim));
         }
         progs.push(Item::new("Files", Cmd::Launch(Launch::Explorer(home()))).icon(Icon::Folder));
-        // the ones you added, then the way to add or take one off
-        let mine = crate::programs::load();
-        if !mine.is_empty() {
-            progs.push(Item::sep());
-            for (name, cmd) in &mine {
-                progs.push(Item::new(name.clone(), shell(name, Icon::Run, Some(cmd))).icon(Icon::Run));
-            }
-        }
         progs.push(Item::sep());
         progs.push(Item::new("Add Program...", Cmd::Launch(Launch::AddProgram)).icon(Icon::Programs));
-        if !mine.is_empty() {
-            let forget = mine.iter().map(|(n, _)| Item::new(n.clone(), Cmd::Forget(n.clone())).icon(Icon::Run)).collect();
+        if !self.mine.is_empty() {
+            let forget = self.mine.iter().map(|(n, _, i)| Item::new(n.clone(), Cmd::Forget(n.clone())).icon(*i)).collect();
             progs.push(Item::sub("Remove Program", forget).icon(Icon::Recycle));
         }
         let docs: Vec<Item> = if self.docs.is_empty() {
@@ -548,8 +563,12 @@ impl Desktop {
                 .map(|p| Item::new(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), Cmd::Launch(Launch::Notepad(Some(p.clone())))).icon(Icon::File))
                 .collect()
         };
-        vec![
-            Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal),
+        // the programs you added sit right at the top, under Terminal
+        let mut top = vec![Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal)];
+        for (name, cmd, icon) in &self.mine {
+            top.push(Item::new(name.clone(), shell(name, *icon, Some(cmd))).icon(*icon));
+        }
+        top.extend(vec![
             Item::sep(),
             Item::sub("Programs", progs).icon(Icon::Programs),
             Item::sub("Recent", docs).icon(Icon::Documents),
@@ -563,10 +582,12 @@ impl Desktop {
             .icon(Icon::Settings),
             Item::sub("Find", vec![Item::new("Files or Folders...", Cmd::Desk("find")).icon(Icon::Folder)]).icon(Icon::Help),
             Item::new("Help", Cmd::Desk("help")).icon(Icon::Help),
+            Item::new("Add Program...", Cmd::Launch(Launch::AddProgram)).icon(Icon::Programs),
             Item::new("Run...", Cmd::Launch(Launch::Run)).icon(Icon::Run),
             Item::sep(),
             Item::new("Quit", Cmd::Launch(Launch::ShutDown)).icon(Icon::Shutdown),
-        ]
+        ]);
+        top
     }
 
     fn open_menu(&mut self, owner: Owner, items: Vec<Item>, x: i32, y: i32, banner: bool) {
@@ -663,7 +684,10 @@ impl Desktop {
                     self.sys(id, s);
                 }
             }
-            Cmd::Forget(name) => crate::programs::remove(&name),
+            Cmd::Forget(name) => {
+                crate::programs::remove(&name);
+                self.refresh_programs();
+            }
             Cmd::Desk(s) => match s {
                 "theme" => self.reload_theme(),
                 "lite" => self.set_lite(true),
@@ -1249,18 +1273,22 @@ impl Desktop {
                 let on = self.sel_icon == Some(i);
                 let (_, col) = ic.icon.glyph(&th);
                 let art = Style::new().fg(if on { th.accent } else { col });
-                for (j, line) in ic.icon.lines().iter().enumerate() {
-                    c.text(x + 2, y + j as i32, line, art);
+                if let Icon::Custom(rows) = ic.icon {
+                    c.pixels(x + 2, y, rows, &pal);
+                } else {
+                    for (j, line) in ic.icon.lines().iter().enumerate() {
+                        c.text(x + 2, y + j as i32, line, art);
+                    }
                 }
                 let s = if on { th.sel() } else { Style::new().fg(th.text) };
                 let lw = ic.label.chars().count() as i32;
-                c.text_max(x + (11 - lw) / 2, y + 3, ic.label, s, x + 11);
+                c.text_max(x + (11 - lw) / 2, y + 3, &ic.label, s, x + 11);
                 continue;
             }
             c.pixels(x + 2, y, ic.icon.art(), &pal);
             let on = self.sel_icon == Some(i);
             let s = if on { st(th.on_accent, th.accent) } else { st(th.text, th.desk) };
-            for (j, line) in wrap_label(ic.label).iter().enumerate() {
+            for (j, line) in wrap_label(&ic.label).iter().enumerate() {
                 let lw = line.chars().count() as i32;
                 c.text_max(x + (12 - lw) / 2, y + 3 + j as i32, line, s, x + 12);
             }
@@ -1548,20 +1576,43 @@ mod tests {
     }
 
     #[test]
-    fn added_programs_join_the_apps_menu() {
+    fn added_programs_join_the_apps_menu_and_the_desktop() {
         let dir = std::env::temp_dir().join(format!("win95-progs-{}", std::process::id()));
         unsafe { std::env::set_var("HOME", &dir) };
-        crate::programs::add("Web", "lynx https://example.com");
-        crate::programs::add("Top", "htop");
-        crate::programs::add("web", "w3m https://example.com");
-        assert_eq!(crate::programs::load(), vec![("Top".into(), "htop".into()), ("web".into(), "w3m https://example.com".into())]);
-        let d = Desktop::new(120, 40, true);
-        let progs = d.start_items().into_iter().find(|i| i.label == "Programs").unwrap().sub;
-        let labels: Vec<String> = progs.iter().map(|i| i.label.clone()).collect();
-        assert!(labels.contains(&"Top".to_string()) && labels.contains(&"Add Program...".to_string()), "{labels:?}");
-        let mut d = d;
-        d.exec(Cmd::Forget("Top".into()), Owner::Start);
+        let mut d = Desktop::new(120, 40, true);
+        d.launch(Launch::AddProgram);
+        let id = d.focus.unwrap();
+        for c in "htop -t".chars() {
+            d.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // paint two pixels, rub one out, paint with another colour
+        let (cx, cy, _, _) = d.wins.last().unwrap().client();
+        let l = MouseButton::Left;
+        m(&mut d, MouseEventKind::Down(l), cx + 12, cy + 7);
+        m(&mut d, MouseEventKind::Drag(l), cx + 14, cy + 7);
+        m(&mut d, MouseEventKind::Up(l), cx + 14, cy + 7);
+        m(&mut d, MouseEventKind::Down(MouseButton::Right), cx + 14, cy + 7);
+        m(&mut d, MouseEventKind::Up(MouseButton::Right), cx + 14, cy + 7);
+        m(&mut d, MouseEventKind::Down(l), cx + 33, cy + 7);
+        m(&mut d, MouseEventKind::Up(l), cx + 33, cy + 7);
+        m(&mut d, MouseEventKind::Down(l), cx + 12, cy + 8);
+        m(&mut d, MouseEventKind::Up(l), cx + 12, cy + 8);
+        d.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(d.idx(id).is_none(), "the dialog closed");
+        assert_eq!(crate::programs::load(), vec![("htop".into(), "htop -t".into())]);
+        let icon = crate::programs::icon("htop").unwrap();
+        assert_eq!(&icon[..2], &["y.......".to_string(), "f.......".to_string()]);
+        // on the Apps menu, right under Terminal, and on the desktop
+        let top: Vec<String> = d.start_items().iter().map(|i| i.label.clone()).collect();
+        assert_eq!(&top[..2], &["Terminal".to_string(), "htop".to_string()]);
+        assert!(d.icons.iter().any(|i| i.label == "htop" && matches!(i.icon, Icon::Custom(_))));
+        // the same command again replaces it; Remove takes it off both
+        crate::programs::add("htop", None);
         assert_eq!(crate::programs::load().len(), 1);
+        assert!(crate::programs::icon("htop").is_none());
+        d.exec(Cmd::Forget("htop".into()), Owner::Start);
+        assert!(crate::programs::load().is_empty());
+        assert!(!d.icons.iter().any(|i| i.label == "htop"));
         assert_eq!(crate::programs::missing("surely-not-a-real-program --x").as_deref(), Some("surely-not-a-real-program"));
         assert_eq!(crate::programs::missing("sh -c true"), None);
         let _ = std::fs::remove_dir_all(&dir);

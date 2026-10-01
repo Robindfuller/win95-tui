@@ -14,6 +14,8 @@ pub enum Icon {
     Git,
     Vim,
     Web,
+    /// Painted in Add Program: 8 by 6 pixels of palette letters.
+    Custom(&'static [&'static str]),
     Recycle,
     Run,
     Help,
@@ -37,6 +39,7 @@ impl Icon {
             Icon::Git => ('±', th.orange),
             Icon::Vim => ('V', th.green),
             Icon::Web => ('◍', th.cyan),
+            Icon::Custom(rows) => ('■', main_colour(rows, th)),
             Icon::Recycle => ('♻', th.text),
             Icon::Run => ('»', th.accent),
             Icon::Help => ('?', th.accent),
@@ -65,6 +68,7 @@ impl Icon {
 
     pub fn art(self) -> &'static [&'static str] {
         match self {
+            Icon::Custom(rows) => rows,
             Icon::Computer => &[
                 ".ffffff.",
                 ".faaaaf.",
@@ -168,6 +172,32 @@ pub fn palette(th: &Theme) -> impl Fn(char) -> Option<Color> + '_ {
         'o' => Some(th.yellow),
         'g' => Some(th.green),
         'r' => Some(th.red),
+        'b' => Some(th.blue),
+        'p' => Some(th.magenta),
+        'n' => Some(th.orange),
         _ => None,
     }
+}
+
+/// The colours the icon painter offers, as palette letters.
+pub const PAINT: [char; 12] = ['f', 'm', 'k', 'l', 'r', 'n', 'o', 'g', 'y', 'b', 'p', 'a'];
+
+/// A painted icon from its pixel rows. The rows live as long as the program
+/// does, so the icon can stay a plain Copy value like the built-in ones.
+pub fn custom(rows: &[String]) -> Icon {
+    let rows: Vec<&'static str> = (0..6)
+        .map(|i| {
+            let r: String = rows.get(i).map(|r| r.chars().chain(std::iter::repeat('.')).take(8).collect()).unwrap_or_else(|| ".".repeat(8));
+            &*Box::leak(r.into_boxed_str())
+        })
+        .collect();
+    Icon::Custom(Box::leak(rows.into_boxed_slice()))
+}
+
+fn main_colour(rows: &[&str], th: &Theme) -> Color {
+    let mut counts = std::collections::HashMap::new();
+    for c in rows.iter().flat_map(|r| r.chars()).filter(|c| *c != '.') {
+        *counts.entry(c).or_insert(0) += 1;
+    }
+    counts.into_iter().max_by_key(|(c, n)| (*n, *c)).and_then(|(c, _)| palette(th)(c)).unwrap_or(th.text)
 }

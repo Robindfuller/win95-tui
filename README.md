@@ -11,9 +11,12 @@ Apps inside it:
 - **Web**: lynx (or w3m) in a window, when one is installed.
 - **Run...** opens any command in its own window.
 
-Add your own under Apps > Programs > Add Program...: a name and the command
-that starts it. It joins the Programs menu (Remove Program takes it off) and is
-kept in ~/.config/win95-tui/programs as `Name = command` lines.
+Add your own with Apps > Add Program...: type the command that starts it and
+paint it an icon (click or drag to paint, right-click rubs out). It goes at the
+top of the Apps menu and on the desktop, named after the command, and Apps >
+Programs > Remove Program takes it off. They're kept in
+~/.config/win95-tui/programs (`name = command` lines) and icons/. A command
+that fails keeps its window open so you can read why.
 
 Drag a window against the far left or right edge to fill that half of the
 screen, into a corner for a quarter, or against the top to maximise. An outline

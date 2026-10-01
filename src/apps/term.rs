@@ -535,8 +535,10 @@ impl App for TermApp {
 
     fn poll(&mut self) -> (bool, Action) {
         let dirty = self.dirty.swap(false, Ordering::Relaxed);
-        if !self.finished && (self.dead.load(Ordering::Relaxed) || matches!(self.child.try_wait(), Ok(Some(_)))) {
-            if self.keep_open {
+        let status = if self.finished { None } else { self.child.try_wait().ok().flatten() };
+        if !self.finished && (self.dead.load(Ordering::Relaxed) || status.is_some()) {
+            // a command that fails stays up, so you can read why
+            if self.keep_open || status.is_some_and(|s| !s.success()) {
                 self.finished = true;
                 return (true, Action::None);
             }

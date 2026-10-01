@@ -1,5 +1,6 @@
-// Programs you add yourself: a name and the command that starts it, kept in
-// ~/.config/win95-tui/programs as "Name = command" lines, one per program.
+// Programs you add yourself: the command that starts one, kept in
+// ~/.config/win95-tui/programs as "name = command" lines, and the icon you
+// painted for it in ~/.config/win95-tui/icons/<name>, six rows of letters.
 use crate::theme::home;
 use std::{fs, path::PathBuf};
 
@@ -24,18 +25,49 @@ fn save(list: &[(String, String)]) {
     let _ = fs::write(path(), body);
 }
 
-/// Adds a program, or changes the command of one with the same name.
-pub fn add(name: &str, cmd: &str) {
+/// What a command is called on the menu: its program, "lynx" for
+/// "lynx https://...", "btop" for "/usr/bin/btop".
+pub fn name_of(cmd: &str) -> String {
+    let prog = cmd.split_whitespace().next().unwrap_or("");
+    prog.rsplit('/').next().unwrap_or(prog).to_string()
+}
+
+fn icon_path(name: &str) -> PathBuf {
+    let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    home().join(".config/win95-tui/icons").join(safe)
+}
+
+/// The icon painted for a program, if it has one.
+pub fn icon(name: &str) -> Option<Vec<String>> {
+    let rows: Vec<String> = fs::read_to_string(icon_path(name)).ok()?.lines().map(String::from).collect();
+    rows.iter().any(|r| r.chars().any(|c| c != '.')).then_some(rows)
+}
+
+/// Adds a program, or changes the one with the same name. Returns its name.
+pub fn add(cmd: &str, icon: Option<&[String]>) -> String {
+    let name = name_of(cmd);
     let mut list = load();
-    list.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
-    list.push((name.to_string(), cmd.to_string()));
+    list.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+    list.push((name.clone(), cmd.to_string()));
     save(&list);
+    let p = icon_path(&name);
+    match icon {
+        Some(rows) if rows.iter().any(|r| r.chars().any(|c| c != '.')) => {
+            let _ = fs::create_dir_all(p.parent().unwrap());
+            let _ = fs::write(&p, rows.join("\n") + "\n");
+        }
+        _ => {
+            let _ = fs::remove_file(&p);
+        }
+    }
+    name
 }
 
 pub fn remove(name: &str) {
     let mut list = load();
     list.retain(|(n, _)| n != name);
     save(&list);
+    let _ = fs::remove_file(icon_path(name));
 }
 
 /// The program a command starts, if it isn't on the PATH.

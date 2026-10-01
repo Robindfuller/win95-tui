@@ -1,6 +1,6 @@
 // Small fixed-size dialogs: Run, About, Quit, the task list and message boxes.
 use super::{notepad::expand, Action, App, Launch};
-use crate::{draw::{st, Canvas}, icons::{palette, Icon}, theme::{home, Theme}};
+use crate::{draw::{st, Canvas}, icons::{palette, Icon, PAINT}, theme::{home, Theme}};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use std::{fs, path::PathBuf};
 
@@ -48,7 +48,7 @@ impl Buttons {
 }
 
 fn icon_art(c: &mut Canvas, th: &Theme, x: i32, y: i32, icon: Icon) {
-    if th.lite {
+    if th.lite && !matches!(icon, Icon::Custom(_)) {
         let (_, col) = icon.glyph(th);
         for (j, line) in icon.lines().iter().enumerate() {
             c.text(x, y + j as i32, line, ratatui::style::Style::new().fg(col));
@@ -194,35 +194,45 @@ impl App for Run {
 
 // ---------------------------------------------------------------- Add Program
 
-/// Name a command and it joins the Apps menu under Programs.
+const GRID: (i32, i32) = (12, 7);
+const SWATCH: (i32, i32) = (32, 7);
+
+/// Type a command, paint it an icon, and it joins the Apps menu and the desktop.
 pub struct AddProgram {
-    name: String,
     cmd: String,
-    /// 0 the name, 1 the command
-    field: usize,
+    /// 6 rows of 8 palette letters, '.' for nothing
+    pix: Vec<Vec<char>>,
+    ink: char,
     buttons: Buttons,
     size: (u16, u16),
 }
 
 impl AddProgram {
     pub fn new() -> AddProgram {
-        AddProgram { name: String::new(), cmd: String::new(), field: 0, buttons: Buttons::new(&["Add", "Cancel"]), size: (60, 10) }
+        AddProgram { cmd: String::new(), pix: vec![vec!['.'; 8]; 6], ink: PAINT[8], buttons: Buttons::new(&["Add", "Cancel"]), size: (64, 15) }
     }
 
-    fn input(&mut self) -> &mut String {
-        if self.field == 0 { &mut self.name } else { &mut self.cmd }
+    fn rows(&self) -> Vec<String> {
+        self.pix.iter().map(|r| r.iter().collect()).collect()
     }
 
     fn go(&mut self) -> Action {
-        let (name, cmd) = (self.name.trim().to_string(), self.cmd.trim().to_string());
+        let cmd = self.cmd.trim().to_string();
         if cmd.is_empty() {
-            self.field = 1;
             return Action::None;
         }
-        // no name given: the command's own, "lynx" for "lynx https://..."
-        let name = if name.is_empty() { cmd.split_whitespace().next().unwrap_or("").to_string() } else { name };
-        crate::programs::add(&name, &cmd);
-        Action::Close
+        crate::programs::add(&cmd, Some(&self.rows()));
+        Action::Many(vec![Action::Refresh, Action::Close])
+    }
+
+    /// Paints (or with the right button rubs out) the pixel under x, y.
+    fn paint(&mut self, x: i32, y: i32, rub: bool) -> bool {
+        let (px, py) = ((x - GRID.0) / 2, y - GRID.1);
+        if x < GRID.0 || !(0..8).contains(&px) || !(0..6).contains(&py) {
+            return false;
+        }
+        self.pix[py as usize][px as usize] = if rub { '.' } else { self.ink };
+        true
     }
 }
 
@@ -234,7 +244,7 @@ impl App for AddProgram {
         Icon::Programs
     }
     fn size_hint(&self) -> (u16, u16) {
-        (60, 10)
+        (64, 15)
     }
     fn resizable(&self) -> bool {
         false
@@ -245,56 +255,94 @@ impl App for AddProgram {
     fn render(&mut self, c: &mut Canvas, th: &Theme, _f: bool) {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let s = st(th.text, th.face);
+        let dim = st(th.dim, th.face);
         c.fill(0, 0, w, h, s);
-        icon_art(c, th, 2, 1, Icon::Programs);
-        c.text(12, 1, "Give it a name and the command that", s);
-        c.text(12, 2, "starts it. It goes under Apps > Programs.", s);
-        c.text(2, 4, "Name:", s);
-        c.field(12, 4, w - 14, &self.name, th);
-        c.text(2, 5, "Command:", s);
-        c.field(12, 5, w - 14, &self.cmd, th);
-        let hint = match crate::programs::missing(&self.cmd) {
-            Some(p) if !self.cmd.trim().is_empty() => (format!("{p} isn't installed yet, e.g. sudo pacman -S {p}"), th.yellow),
-            _ => ("Anything you'd type in a terminal, like htop".to_string(), th.dim),
+        c.text(2, 1, "Type the command that starts it, and paint it an icon.", s);
+        c.text(2, 3, "Command:", s);
+        c.field(GRID.0, 3, w - GRID.0 - 2, &self.cmd, th);
+        let cmd = self.cmd.trim();
+        let (hint, hs) = match crate::programs::missing(cmd) {
+            _ if cmd.is_empty() => ("Anything you'd type in a terminal, like htop".to_string(), dim),
+            Some(p) => (format!("{p} isn't installed yet: sudo pacman -S {p}"), st(th.yellow, th.face)),
+            None => (format!("Shows as {} on the Apps menu and the desktop", crate::programs::name_of(cmd)), dim),
         };
-        c.text_max(12, 6, &hint.0, st(hint.1, th.face), w - 1);
+        c.text_max(GRID.0, 4, &hint, hs, w - 1);
+
+        // the painting grid: each pixel two cells wide
+        c.text(2, 6, "Icon:", s);
+        c.frame(GRID.0 - 1, GRID.1 - 1, 18, 8, dim);
+        let pal = palette(th);
+        for (y, row) in self.pix.iter().enumerate() {
+            for (x, &p) in row.iter().enumerate() {
+                let (cx, cy) = (GRID.0 + 2 * x as i32, GRID.1 + y as i32);
+                match pal(p) {
+                    Some(col) => c.text(cx, cy, "██", ratatui::style::Style::new().fg(col).bg(th.face)),
+                    None => c.text(cx, cy, "· ", dim),
+                };
+            }
+        }
+        // the colours, the one in use in brackets
+        for (i, &p) in PAINT.iter().enumerate() {
+            let (x, y) = (SWATCH.0 + (i as i32 % 6) * 4, SWATCH.1 + i as i32 / 6);
+            if let Some(col) = pal(p) {
+                c.text(x + 1, y, "██", ratatui::style::Style::new().fg(col).bg(th.face));
+            }
+            if p == self.ink {
+                c.text(x, y, "[", s);
+                c.text(x + 3, y, "]", s);
+            }
+        }
+        let rows = self.rows();
+        let refs: Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
+        c.pixels(SWATCH.0 + 1, 10, &refs, &pal);
+        c.text(SWATCH.0 + 12, 10, "[ Clear ]", s);
+        c.text(SWATCH.0 + 12, 11, "right-click rubs out", dim);
         self.buttons.render(c, th, w, h - 1);
     }
     fn cursor(&self) -> Option<(u16, u16)> {
-        let room = self.size.0 as usize - 16;
-        let n = if self.field == 0 { &self.name } else { &self.cmd }.chars().count();
-        Some((13 + n.min(room) as u16, 4 + self.field as u16))
+        let room = self.size.0 as usize - GRID.0 as usize - 4;
+        Some((GRID.0 as u16 + 1 + self.cmd.chars().count().min(room) as u16, 3))
     }
     fn key(&mut self, k: KeyEvent) -> Action {
         match k.code {
             KeyCode::Esc => return Action::Close,
             KeyCode::Enter => return if self.buttons.focus == 1 { Action::Close } else { self.go() },
-            KeyCode::Tab | KeyCode::Down => self.field = (self.field + 1) % 2,
-            KeyCode::BackTab | KeyCode::Up => self.field = (self.field + 1) % 2,
-            KeyCode::Backspace => {
-                self.input().pop();
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.buttons.key(&k);
             }
-            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => self.input().clear(),
-            KeyCode::Char(ch) if !k.modifiers.contains(KeyModifiers::CONTROL) => self.input().push(ch),
+            KeyCode::Backspace => {
+                self.cmd.pop();
+            }
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => self.cmd.clear(),
+            KeyCode::Char(ch) if !k.modifiers.contains(KeyModifiers::CONTROL) => self.cmd.push(ch),
             _ => {}
         }
         Action::None
     }
     fn paste(&mut self, s: &str) {
-        let line = s.lines().next().unwrap_or("").to_string();
-        self.input().push_str(&line);
+        self.cmd.push_str(s.lines().next().unwrap_or(""));
     }
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, _m: KeyModifiers) -> Action {
-        if let MouseEventKind::Down(MouseButton::Left) = kind {
-            match y {
-                4 | 5 => self.field = (y - 4) as usize,
-                _ if y == self.size.1 as i32 - 1 => match self.buttons.hit(self.size.0 as i32, x) {
-                    Some(0) => return self.go(),
-                    Some(_) => return Action::Close,
-                    None => {}
-                },
-                _ => {}
+        match kind {
+            MouseEventKind::Down(b) | MouseEventKind::Drag(b) if b != MouseButton::Middle => {
+                let rub = b == MouseButton::Right;
+                if self.paint(x, y, rub) || !matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                    return Action::None;
+                }
+                let (sx, sy) = (x - SWATCH.0, y - SWATCH.1);
+                if (0..24).contains(&sx) && (0..2).contains(&sy) {
+                    self.ink = PAINT[(sy * 6 + sx / 4) as usize];
+                } else if y == 10 && (SWATCH.0 + 12..SWATCH.0 + 21).contains(&x) {
+                    self.pix = vec![vec!['.'; 8]; 6];
+                } else if y == self.size.1 as i32 - 1 {
+                    match self.buttons.hit(self.size.0 as i32, x) {
+                        Some(0) => return self.go(),
+                        Some(_) => return Action::Close,
+                        None => {}
+                    }
+                }
             }
+            _ => {}
         }
         Action::None
     }
