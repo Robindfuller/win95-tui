@@ -2,6 +2,7 @@ mod apps;
 mod draw;
 mod icons;
 mod menu;
+mod programs;
 mod theme;
 mod wm;
 

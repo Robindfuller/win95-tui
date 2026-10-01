@@ -8,6 +8,8 @@ pub enum Cmd {
     App(&'static str),
     Sys(Sys),
     Desk(&'static str),
+    /// take a program you added off the Apps menu
+    Forget(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

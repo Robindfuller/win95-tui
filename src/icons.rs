@@ -13,6 +13,7 @@ pub enum Icon {
     Monitor,
     Git,
     Vim,
+    Web,
     Recycle,
     Run,
     Help,
@@ -35,6 +36,7 @@ impl Icon {
             Icon::Monitor => ('▟', th.green),
             Icon::Git => ('±', th.orange),
             Icon::Vim => ('V', th.green),
+            Icon::Web => ('◍', th.cyan),
             Icon::Recycle => ('♻', th.text),
             Icon::Run => ('»', th.accent),
             Icon::Help => ('?', th.accent),
@@ -56,6 +58,7 @@ impl Icon {
             Icon::Git => [" ●──╮  ", " │  ●  ", " ●──╯  "],
             Icon::Recycle => ["╶─────╴", " │┊┊┊│ ", " ╰───╯ "],
             Icon::Vim => [" ╲   ╱ ", "  ╲ ╱  ", "   V   "],
+            Icon::Web => [" ╭─┬─╮ ", " ├─┼─┤ ", " ╰─┴─╯ "],
             _ => ["╭─────╮", "│  ?  │", "╰─────╯"],
         }
     }
@@ -125,6 +128,14 @@ impl Icon {
                 "..oo....",
                 "..o.....",
                 "..o.....",
+            ],
+            Icon::Web => &[
+                "..yyyy..",
+                ".yggyyy.",
+                "yggggyyy",
+                "yyggyyyy",
+                ".yyygyy.",
+                "..yyyy..",
             ],
             Icon::Vim => &[
                 "gg....gg",

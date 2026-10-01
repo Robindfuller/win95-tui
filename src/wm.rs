@@ -1,7 +1,7 @@
 // The window manager: desktop icons, overlapping windows, taskbar and menus.
 use crate::{
     apps::{
-        dialogs::{about_text, MsgBox, Run, ShutDown, TaskList},
+        dialogs::{about_text, AddProgram, MsgBox, Run, ShutDown, TaskList},
         explorer::Explorer,
         mines::Mines,
         notepad::Notepad,
@@ -33,6 +33,8 @@ pub struct Win {
     pub h: i32,
     restore: Option<(i32, i32, i32, i32)>,
     pub max: bool,
+    /// Snapped to half or a quarter of the screen; `restore` holds its old size.
+    snapped: bool,
     pub min: bool,
     pub app: Box<dyn App>,
     has_bar: bool,
@@ -124,9 +126,23 @@ fn bar_layout(menus: &[(&'static str, Vec<Item>)]) -> Vec<(i32, i32)> {
         .collect()
 }
 
+/// Where a window lands when it is dropped against a screen edge.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Snap {
+    Max,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 enum Drag {
     None,
-    Move { id: u64, dx: i32, dy: i32 },
+    /// `pull`: the window is maximised or snapped and goes back to its own
+    /// size as soon as it is dragged.
+    Move { id: u64, dx: i32, dy: i32, pull: bool },
     Resize { id: u64, l: bool, r: bool, b: bool, mx: i32, my: i32, orig: (i32, i32, i32, i32) },
     Button { id: u64, part: Part },
     Client { id: u64 },
@@ -157,6 +173,8 @@ pub struct Desktop {
     h: i32,
     menu: Option<(MenuState, Instant)>,
     drag: Drag,
+    /// The snap the window being dragged would take if dropped now.
+    snap: Option<Snap>,
     hover: Option<(i32, i32)>,
     icons: Vec<DeskIcon>,
     sel_icon: Option<usize>,
@@ -165,6 +183,12 @@ pub struct Desktop {
     pub quit: bool,
     docs: Vec<PathBuf>,
     clock: String,
+}
+
+/// A text web browser to open in a window, if one is installed.
+fn browser() -> Option<String> {
+    const START: &str = "https://lite.duckduckgo.com/lite/";
+    ["lynx", "w3m"].iter().find(|b| has(b)).map(|b| format!("{b} {START}"))
 }
 
 fn has(cmd: &str) -> bool {
@@ -200,6 +224,9 @@ impl Desktop {
         if has("btop") {
             icons.push(DeskIcon { icon: Icon::Monitor, label: "Monitor", launch: Launch::shell("Monitor", Icon::Monitor, Some("btop")) });
         }
+        if let Some(b) = browser() {
+            icons.push(DeskIcon { icon: Icon::Web, label: "Web", launch: Launch::shell("Web", Icon::Web, Some(&b)) });
+        }
         if has("lazygit") {
             icons.push(DeskIcon { icon: Icon::Git, label: "Git", launch: Launch::shell("Git", Icon::Git, Some("lazygit")) });
         }
@@ -216,6 +243,7 @@ impl Desktop {
             h: h as i32,
             menu: None,
             drag: Drag::None,
+            snap: None,
             hover: None,
             icons,
             sel_icon: None,
@@ -276,10 +304,62 @@ impl Desktop {
             }
             w.max = false;
         } else {
-            w.restore = Some((w.x, w.y, w.w, w.h));
+            if !w.snapped {
+                w.restore = Some((w.x, w.y, w.w, w.h));
+            }
             (w.x, w.y, w.w, w.h) = (0, 0, sw, sh);
             w.max = true;
+            w.snapped = false;
         }
+        w.sync();
+    }
+
+    /// The rectangle a snap fills: halves and quarters of the work area.
+    fn snap_rect(&self, s: Snap) -> (i32, i32, i32, i32) {
+        let (sw, sh) = (self.w, self.work_h());
+        let (hw, hh) = (sw / 2, sh / 2);
+        match s {
+            Snap::Max => (0, 0, sw, sh),
+            Snap::Left => (0, 0, hw, sh),
+            Snap::Right => (hw, 0, sw - hw, sh),
+            Snap::TopLeft => (0, 0, hw, hh),
+            Snap::TopRight => (hw, 0, sw - hw, hh),
+            Snap::BottomLeft => (0, hh, hw, sh - hh),
+            Snap::BottomRight => (hw, hh, sw - hw, sh - hh),
+        }
+    }
+
+    /// Which snap the pointer is asking for: the far left or right edge for a
+    /// half, its top or bottom few rows for a quarter, the top edge to maximise.
+    fn snap_at(&self, x: i32, y: i32) -> Option<Snap> {
+        let (sw, sh) = (self.w, self.work_h());
+        let corner = (sh / 6).max(2);
+        if x <= 0 {
+            Some(if y < corner { Snap::TopLeft } else if y >= sh - corner { Snap::BottomLeft } else { Snap::Left })
+        } else if x >= sw - 1 {
+            Some(if y < corner { Snap::TopRight } else if y >= sh - corner { Snap::BottomRight } else { Snap::Right })
+        } else if y <= 0 {
+            Some(Snap::Max)
+        } else {
+            None
+        }
+    }
+
+    fn snap_win(&mut self, id: u64, s: Snap) {
+        if s == Snap::Max {
+            if !self.win(id).is_some_and(|w| w.max) {
+                self.toggle_max(id);
+            }
+            return;
+        }
+        let (x, y, ww, hh) = self.snap_rect(s);
+        let Some(w) = self.win(id) else { return };
+        if !w.snapped && !w.max {
+            w.restore = Some((w.x, w.y, w.w, w.h));
+        }
+        (w.x, w.y, w.w, w.h) = (x, y, ww, hh);
+        w.max = false;
+        w.snapped = true;
         w.sync();
     }
 
@@ -328,6 +408,7 @@ impl Desktop {
     pub fn launch(&mut self, l: Launch) {
         let single = match &l {
             Launch::Run => Some("Run"),
+            Launch::AddProgram => Some("Add Program"),
             Launch::ShutDown => Some("Quit"),
             Launch::TaskList => Some("Tasks"),
             _ => None,
@@ -356,6 +437,7 @@ impl Desktop {
             Launch::Mines => Box::new(Mines::new()),
             Launch::Explorer(p) => Box::new(Explorer::new(p)),
             Launch::Run => Box::new(Run::new()),
+            Launch::AddProgram => Box::new(AddProgram::new()),
             Launch::About => Box::new(MsgBox::new("About".into(), about_text(&self.th))),
             Launch::ShutDown => Box::new(ShutDown::new()),
             Launch::TaskList => Box::new(TaskList::new(self.wins.iter().filter(|w| !w.app.dialog()).map(|w| (w.id, w.title.clone())).collect())),
@@ -382,7 +464,7 @@ impl Desktop {
         self.next_id += 1;
         let title = app.title();
         let big = app.resizable() && (cw as i32 + 2 > sw || ch as i32 + 2 + has_bar as i32 > sh);
-        let mut win = Win { id, x, y, w, h, restore: None, max: false, min: false, app, has_bar, buf: Buffer::empty(Rect::new(0, 0, 1, 1)), title };
+        let mut win = Win { id, x, y, w, h, restore: None, max: false, snapped: false, min: false, app, has_bar, buf: Buffer::empty(Rect::new(0, 0, 1, 1)), title };
         win.sync();
         self.wins.push(win);
         self.focus_win(id);
@@ -432,6 +514,9 @@ impl Desktop {
         if has("btop") {
             progs.push(Item::new("Monitor", shell("Monitor", Icon::Monitor, Some("btop"))).icon(Icon::Monitor));
         }
+        if let Some(b) = browser() {
+            progs.push(Item::new("Web", shell("Web", Icon::Web, Some(&b))).icon(Icon::Web));
+        }
         if has("lazygit") {
             progs.push(Item::new("Git", shell("Git", Icon::Git, Some("lazygit"))).icon(Icon::Git));
         }
@@ -440,6 +525,20 @@ impl Desktop {
             progs.push(Item::new("Vim", shell("Vim", Icon::Vim, Some("nvim"))).icon(Icon::Vim));
         }
         progs.push(Item::new("Files", Cmd::Launch(Launch::Explorer(home()))).icon(Icon::Folder));
+        // the ones you added, then the way to add or take one off
+        let mine = crate::programs::load();
+        if !mine.is_empty() {
+            progs.push(Item::sep());
+            for (name, cmd) in &mine {
+                progs.push(Item::new(name.clone(), shell(name, Icon::Run, Some(cmd))).icon(Icon::Run));
+            }
+        }
+        progs.push(Item::sep());
+        progs.push(Item::new("Add Program...", Cmd::Launch(Launch::AddProgram)).icon(Icon::Programs));
+        if !mine.is_empty() {
+            let forget = mine.iter().map(|(n, _)| Item::new(n.clone(), Cmd::Forget(n.clone())).icon(Icon::Run)).collect();
+            progs.push(Item::sub("Remove Program", forget).icon(Icon::Recycle));
+        }
         let docs: Vec<Item> = if self.docs.is_empty() {
             vec![Item::new("(Empty)", Cmd::None).enabled(false)]
         } else {
@@ -564,6 +663,7 @@ impl Desktop {
                     self.sys(id, s);
                 }
             }
+            Cmd::Forget(name) => crate::programs::remove(&name),
             Cmd::Desk(s) => match s {
                 "theme" => self.reload_theme(),
                 "lite" => self.set_lite(true),
@@ -955,9 +1055,10 @@ impl Desktop {
                         }
                     } else if self.double(x, y) {
                         self.toggle_max(id);
-                    } else if !self.wins.last().unwrap().max {
+                    } else {
                         let w = self.wins.last().unwrap();
-                        self.drag = Drag::Move { id, dx: x - w.x, dy: y - w.y };
+                        let pull = (w.max || w.snapped) && w.app.resizable();
+                        self.drag = Drag::Move { id, dx: x - w.x, dy: y - w.y, pull };
                     }
                 }
                 Part::Edge(l, r, bot) => {
@@ -1011,6 +1112,11 @@ impl Desktop {
                     }
                 }
             }
+            Drag::Move { id, .. } => {
+                if let Some(s) = self.snap.take() {
+                    self.snap_win(id, s);
+                }
+            }
             Drag::Client { id } => self.forward(id, MouseEventKind::Up(b), x, y, mods),
             Drag::Start | Drag::None => {
                 // Press on the Apps button, slide up and release on an item.
@@ -1031,11 +1137,27 @@ impl Desktop {
     fn mouse_drag(&mut self, b: MouseButton, x: i32, y: i32, mods: KeyModifiers) {
         let (sw, sh) = (self.w, self.work_h());
         match self.drag {
-            Drag::Move { id, dx, dy } => {
+            Drag::Move { id, mut dx, dy, pull } => {
+                if pull {
+                    // Pulled off a snap or out of maximised: back to its own size,
+                    // still held at the same point along the title bar.
+                    if let Some(w) = self.win(id) {
+                        if let Some((_, _, rw, rh)) = w.restore.take() {
+                            dx = (dx * rw / w.w.max(1)).clamp(3, (rw - 8).max(3));
+                            (w.w, w.h) = (rw, rh);
+                        }
+                        w.max = false;
+                        w.snapped = false;
+                        w.sync();
+                    }
+                    self.drag = Drag::Move { id, dx, dy, pull: false };
+                }
                 if let Some(w) = self.win(id) {
                     w.x = (x - dx).clamp(4 - w.w, sw - 4);
                     w.y = (y - dy).clamp(0, sh - 1);
                 }
+                let can = self.wins.iter().find(|w| w.id == id).is_some_and(|w| w.app.resizable());
+                self.snap = if can { self.snap_at(x, y) } else { None };
             }
             Drag::Resize { id, l, r, b: bot, mx, my, orig: (ox, oy, ow, oh) } => {
                 if let Some(w) = self.win(id) {
@@ -1160,6 +1282,11 @@ impl Desktop {
             }
             let focused = self.focus == Some(w.id);
             draw_window(&mut c, &th, w, focused, pressed.filter(|p| p.0 == w.id).map(|p| p.1), open_bar.filter(|b| b.0 == w.id).map(|b| b.1));
+        }
+        // Where the window will land if it is let go here.
+        if let (Some(s), Drag::Move { .. }) = (self.snap, &self.drag) {
+            let (x, y, w, h) = self.snap_rect(s);
+            c.frame(x, y, w, h, Style::new().fg(th.accent));
         }
         self.render_taskbar(&mut c, &th);
         if let Some((m, _)) = &self.menu {
@@ -1365,3 +1492,79 @@ fn draw_frame_lite(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed: 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+
+    fn m(d: &mut Desktop, kind: MouseEventKind, x: i32, y: i32) {
+        d.mouse(MouseEvent { kind, column: x as u16, row: y as u16, modifiers: KeyModifiers::NONE });
+    }
+
+    fn drag(d: &mut Desktop, from: (i32, i32), to: (i32, i32)) {
+        let l = MouseButton::Left;
+        m(d, MouseEventKind::Down(l), from.0, from.1);
+        m(d, MouseEventKind::Drag(l), (from.0 + to.0) / 2, (from.1 + to.1) / 2);
+        m(d, MouseEventKind::Drag(l), to.0, to.1);
+        m(d, MouseEventKind::Up(l), to.0, to.1);
+    }
+
+    fn r(d: &Desktop) -> (i32, i32, i32, i32) {
+        let w = d.wins.last().unwrap();
+        (w.x, w.y, w.w, w.h)
+    }
+
+    #[test]
+    fn dragging_to_an_edge_snaps_and_pulling_off_restores() {
+        let mut d = Desktop::new(120, 40, true);
+        d.launch(Launch::Notepad(None));
+        let (x, y, w, h) = { let w = d.wins.last().unwrap(); (w.x, w.y, w.w, w.h) };
+        let sh = d.work_h();
+        // far right edge: the right half
+        drag(&mut d, (x + 6, y), (119, 20));
+        let n = r(&d);
+        assert_eq!((n.0, n.1, n.2, n.3), (60, 0, 60, sh));
+        assert!(d.snap.is_none());
+        // pulled back out, it has its own size again
+        drag(&mut d, (n.0 + 6, 0), (40, 15));
+        let n = r(&d);
+        assert_eq!((n.2, n.3), (w, h));
+        // far left edge: the left half; top-left corner: a quarter
+        drag(&mut d, (n.0 + 6, n.1), (0, 20));
+        let n = r(&d);
+        assert_eq!((n.0, n.1, n.2, n.3), (0, 0, 60, sh));
+        drag(&mut d, (n.0 + 6, 0), (0, 0));
+        let n = r(&d);
+        assert_eq!((n.0, n.1, n.2, n.3), (0, 0, 60, sh / 2));
+        // top edge maximises
+        drag(&mut d, (n.0 + 6, 0), (50, 0));
+        assert!(d.wins.last().unwrap().max);
+        // and a plain move doesn't snap
+        drag(&mut d, (30, 0), (40, 10));
+        let n = r(&d);
+        assert!(!d.wins.last().unwrap().max && !d.wins.last().unwrap().snapped);
+        assert_eq!((n.2, n.3), (w, h));
+    }
+
+    #[test]
+    fn added_programs_join_the_apps_menu() {
+        let dir = std::env::temp_dir().join(format!("win95-progs-{}", std::process::id()));
+        unsafe { std::env::set_var("HOME", &dir) };
+        crate::programs::add("Web", "lynx https://example.com");
+        crate::programs::add("Top", "htop");
+        crate::programs::add("web", "w3m https://example.com");
+        assert_eq!(crate::programs::load(), vec![("Top".into(), "htop".into()), ("web".into(), "w3m https://example.com".into())]);
+        let d = Desktop::new(120, 40, true);
+        let progs = d.start_items().into_iter().find(|i| i.label == "Programs").unwrap().sub;
+        let labels: Vec<String> = progs.iter().map(|i| i.label.clone()).collect();
+        assert!(labels.contains(&"Top".to_string()) && labels.contains(&"Add Program...".to_string()), "{labels:?}");
+        let mut d = d;
+        d.exec(Cmd::Forget("Top".into()), Owner::Start);
+        assert_eq!(crate::programs::load().len(), 1);
+        assert_eq!(crate::programs::missing("surely-not-a-real-program --x").as_deref(), Some("surely-not-a-real-program"));
+        assert_eq!(crate::programs::missing("sh -c true"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+

@@ -15,6 +15,7 @@ pub enum Launch {
     Mines,
     Explorer(PathBuf),
     Run,
+    AddProgram,
     About,
     ShutDown,
     TaskList,
