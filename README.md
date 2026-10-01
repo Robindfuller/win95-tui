@@ -8,7 +8,7 @@ Apps inside it:
 
 - **Terminal**: a real shell in a window. Anything runs in it (nvim, btop, lazygit, even this).
 - **Notes**, **Mines**, **Files** (file browser).
-- **Web**: lynx (or w3m) in a window, when one is installed.
+- **Web**: elinks (or lynx, or w3m) in a window, when one is installed.
 - **Run...** opens any command in its own window.
 
 Add your own with Apps > Add Program...: type the command that starts it and

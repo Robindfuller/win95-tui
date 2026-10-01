@@ -216,7 +216,7 @@ pub struct Desktop {
 /// A text web browser to open in a window, if one is installed.
 fn browser() -> Option<String> {
     const START: &str = "https://lite.duckduckgo.com/lite/";
-    ["lynx", "w3m"].iter().find(|b| has(b)).map(|b| format!("{b} {START}"))
+    ["elinks", "lynx", "w3m"].iter().find(|b| has(b)).map(|b| format!("{b} {START}"))
 }
 
 fn has(cmd: &str) -> bool {

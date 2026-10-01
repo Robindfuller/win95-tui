@@ -25,8 +25,8 @@ fn save(list: &[(String, String)]) {
     let _ = fs::write(path(), body);
 }
 
-/// What a command is called on the menu: its program, "lynx" for
-/// "lynx https://...", "btop" for "/usr/bin/btop".
+/// What a command is called on the menu: its program, "elinks" for
+/// "elinks https://...", "btop" for "/usr/bin/btop".
 pub fn name_of(cmd: &str) -> String {
     let prog = cmd.split_whitespace().next().unwrap_or("");
     prog.rsplit('/').next().unwrap_or(prog).to_string()
