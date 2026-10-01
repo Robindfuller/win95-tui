@@ -136,7 +136,7 @@ impl Explorer {
 impl App for Explorer {
     fn title(&self) -> String {
         let name = self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or("/".into());
-        if self.path == home() { "My Documents".into() } else if self.path == Path::new("/") { "My Computer".into() } else { format!("Exploring - {}", name) }
+        if self.path == home() { "Home".into() } else if self.path == Path::new("/") { "Computer".into() } else { format!("Files - {}", name) }
     }
     fn icon(&self) -> Icon {
         if self.path == Path::new("/") { Icon::Computer } else { Icon::Folder }
@@ -150,7 +150,7 @@ impl App for Explorer {
         c.fill(0, 0, w, h, st(th.text, th.face));
         let x = c.text(1, 0, "Address", st(th.text, th.face));
         c.field(x + 1, 0, w - x - 2, &self.path.display().to_string(), th);
-        let head = st(th.text, th.button);
+        let head = if th.lite { st(th.dim, th.button).add_modifier(Modifier::BOLD) } else { st(th.text, th.button) };
         c.fill(0, 1, w, 1, head);
         let size_x = w - 25;
         let date_x = w - 16;
@@ -167,7 +167,7 @@ impl App for Explorer {
         for (row, (i, e)) in self.entries.iter().enumerate().skip(self.top).take(self.list_rows()).enumerate() {
             let y = 2 + row as i32;
             let on = i == self.sel;
-            let s = if on { st(th.on_accent, th.accent) } else { body };
+            let s = if on { th.sel() } else { body };
             if on {
                 c.fill(0, y, w, 1, s);
             }
@@ -251,7 +251,7 @@ impl App for Explorer {
         vec![
             ("File", vec![
                 Item::new("Open", Cmd::App("open")).key("Enter"),
-                Item::new("MS-DOS Prompt Here", Cmd::App("term")).icon(Icon::Terminal),
+                Item::new("Terminal Here", Cmd::App("term")).icon(Icon::Terminal),
                 Item::new("New Text Document", Cmd::App("newtxt")).icon(Icon::Notepad),
                 Item::sep(),
                 Item::new("Close", Cmd::Sys(Sys::Close)),
@@ -262,8 +262,8 @@ impl App for Explorer {
             ]),
             ("Go", vec![
                 Item::new("Up One Level", Cmd::App("up")).key("Bksp"),
-                Item::new("My Documents", Cmd::App("home")).icon(Icon::Folder),
-                Item::new("My Computer", Cmd::App("root")).icon(Icon::Computer),
+                Item::new("Home", Cmd::App("home")).icon(Icon::Folder),
+                Item::new("Computer", Cmd::App("root")).icon(Icon::Computer),
             ]),
         ]
     }
@@ -271,7 +271,7 @@ impl App for Explorer {
     fn command(&mut self, cmd: &str) -> Action {
         match cmd {
             "open" => return self.open(),
-            "term" => return Action::Launch(Launch::Shell { cmd: None, cwd: Some(self.path.clone()), title: "MS-DOS Prompt".into(), icon: Icon::Terminal, keep_open: false }),
+            "term" => return Action::Launch(Launch::Shell { cmd: None, cwd: Some(self.path.clone()), title: "Terminal".into(), icon: Icon::Terminal, keep_open: false }),
             "newtxt" => {
                 let mut i = 1;
                 let mut p = self.path.join("New Text Document.txt");

@@ -194,7 +194,7 @@ impl TermApp {
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader()?;
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pty.master.take_writer()?));
-        let cb = Cb { fg: Theme::rgb_hex(th.text), bg: Theme::rgb_hex(th.client), ..Default::default() };
+        let cb = Cb { fg: th.fg_hex.clone(), bg: th.bg_hex.clone(), ..Default::default() };
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(24, 80, 5000, cb)));
         let dirty = Arc::new(AtomicBool::new(true));
         let dead = Arc::new(AtomicBool::new(false));
@@ -563,7 +563,7 @@ impl App for TermApp {
 
     fn command(&mut self, cmd: &str) -> Action {
         match cmd {
-            "new" => Action::Launch(super::Launch::Shell { cmd: None, cwd: Some(self.cwd.clone()), title: "MS-DOS Prompt".into(), icon: Icon::Terminal, keep_open: false }),
+            "new" => Action::Launch(super::Launch::Shell { cmd: None, cwd: Some(self.cwd.clone()), title: "Terminal".into(), icon: Icon::Terminal, keep_open: false }),
             "explore" => Action::Launch(super::Launch::Explorer(self.cwd.clone())),
             "pgup" => {
                 self.set_scroll(self.scroll + self.size.1 as usize);
@@ -587,7 +587,7 @@ impl App for TermApp {
         self.fg = th.text;
         self.bg = th.client;
         let mut p = self.parser.lock().unwrap();
-        p.callbacks_mut().fg = Theme::rgb_hex(th.text);
-        p.callbacks_mut().bg = Theme::rgb_hex(th.client);
+        p.callbacks_mut().fg = th.fg_hex.clone();
+        p.callbacks_mut().bg = th.bg_hex.clone();
     }
 }

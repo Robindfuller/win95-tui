@@ -161,7 +161,7 @@ impl Mines {
 
 impl App for Mines {
     fn title(&self) -> String {
-        "Minesweeper".into()
+        "Mines".into()
     }
     fn icon(&self) -> Icon {
         Icon::Mines
@@ -176,7 +176,7 @@ impl App for Mines {
     fn render(&mut self, c: &mut Canvas, th: &Theme, _focused: bool) {
         let (cw, ch) = (self.size.0 as i32, self.size.1 as i32);
         c.fill(0, 0, cw, ch, st(th.text, th.face));
-        let led = st(th.red, th.shadow).add_modifier(Modifier::BOLD);
+        let led = if th.lite { st(th.red, th.face) } else { st(th.red, th.shadow) }.add_modifier(Modifier::BOLD);
         let left = self.n as i64 - self.flag.iter().filter(|&&f| f).count() as i64;
         c.text(1, 0, &format!("{:03}", left.clamp(-99, 999)), led);
         c.text(cw - 4, 0, &format!("{:03}", self.secs.min(999)), led);
@@ -199,7 +199,9 @@ impl App for Mines {
                     ("✗ ".into(), st(th.red, th.client))
                 } else {
                     let bg = if (x + y) % 2 == 0 { th.tile_a } else { th.tile_b };
-                    if self.flag[i] { ("⚑ ".into(), st(th.red, bg).add_modifier(Modifier::BOLD)) } else { ("  ".into(), st(th.text, bg)) }
+                    if th.lite && !self.flag[i] {
+                        ("· ".into(), st(th.dim, bg))
+                    } else if self.flag[i] { ("⚑ ".into(), st(th.red, bg).add_modifier(Modifier::BOLD)) } else { ("  ".into(), st(th.text, bg)) }
                 };
                 let style = if self.kb && self.cur == (x, y) { style.add_modifier(Modifier::REVERSED) } else { style };
                 c.text(px, py, &sym, style);
@@ -285,7 +287,7 @@ impl App for Mines {
             }
             "help" => {
                 return Action::Launch(super::Launch::Msg {
-                    title: "Minesweeper".into(),
+                    title: "Mines".into(),
                     text: "Left click opens a square, right click flags it.\nClick a number with enough flags round it to open its neighbours.\n\nKeys: arrows move, Space opens, F flags, F2 new game.".into(),
                 })
             }

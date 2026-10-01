@@ -147,6 +147,7 @@ struct DeskIcon {
 
 pub struct Desktop {
     pub th: Theme,
+    lite: bool,
     theme_mtime: Option<SystemTime>,
     theme_check: Instant,
     wins: Vec<Win>,
@@ -161,8 +162,6 @@ pub struct Desktop {
     sel_icon: Option<usize>,
     last_click: Option<(Instant, i32, i32)>,
     kbmode: Option<(u64, bool)>,
-    splash: Option<Instant>,
-    bye: Option<Instant>,
     pub quit: bool,
     docs: Vec<PathBuf>,
     clock: String,
@@ -176,36 +175,38 @@ fn clock() -> String {
     chrono::Local::now().format("%H:%M").to_string()
 }
 
-const HELP: &str = "Use the mouse just like Windows 95.\n\n\
-Ctrl+Esc or Alt+S   Start menu\n\
+const HELP: &str = "Click, drag and double-click like a normal desktop.\n\n\
+Ctrl+Esc or Alt+S   Apps menu\n\
 Alt+Tab or Alt+`    Switch window\n\
 Alt+F4              Close window\n\
 Alt+Space           Window menu (Move/Size with arrows)\n\
-Ctrl+Alt+Del        Close Program\n\
-Shift+PgUp/PgDn     Scroll back in a DOS prompt\n\
-Double-click title  Maximise\n\n\
+Ctrl+Alt+Del        Task list\n\
+Shift+PgUp/PgDn     Scroll back in a terminal\n\
+Double-click title  Maximise\n\
+Alt+L               Lite or Classic look\n\n\
 Colours follow your Omarchy theme as it changes.";
 
 const FIND: &str = r#"printf 'Named: '; read -r q; [ -n "" ] && find ~ -iname "**" -not -path '*/.*' 2>/dev/null | sed "s|^/home/rdf|~|" | head -500"#;
 
 impl Desktop {
-    pub fn new(w: u16, h: u16) -> Desktop {
+    pub fn new(w: u16, h: u16, lite: bool) -> Desktop {
         let mut icons = vec![
-            DeskIcon { icon: Icon::Computer, label: "My Computer", launch: Launch::Explorer(PathBuf::from("/")) },
-            DeskIcon { icon: Icon::Folder, label: "My Documents", launch: Launch::Explorer(home()) },
-            DeskIcon { icon: Icon::Terminal, label: "MS-DOS Prompt", launch: Launch::shell("MS-DOS Prompt", Icon::Terminal, None) },
-            DeskIcon { icon: Icon::Notepad, label: "Notepad", launch: Launch::Notepad(None) },
-            DeskIcon { icon: Icon::Mines, label: "Minesweeper", launch: Launch::Mines },
+            DeskIcon { icon: Icon::Computer, label: "Computer", launch: Launch::Explorer(PathBuf::from("/")) },
+            DeskIcon { icon: Icon::Folder, label: "Home", launch: Launch::Explorer(home()) },
+            DeskIcon { icon: Icon::Terminal, label: "Terminal", launch: Launch::shell("Terminal", Icon::Terminal, None) },
+            DeskIcon { icon: Icon::Notepad, label: "Notes", launch: Launch::Notepad(None) },
+            DeskIcon { icon: Icon::Mines, label: "Mines", launch: Launch::Mines },
         ];
         if has("btop") {
-            icons.push(DeskIcon { icon: Icon::Monitor, label: "System Monitor", launch: Launch::shell("System Monitor", Icon::Monitor, Some("btop")) });
+            icons.push(DeskIcon { icon: Icon::Monitor, label: "Monitor", launch: Launch::shell("Monitor", Icon::Monitor, Some("btop")) });
         }
         if has("lazygit") {
             icons.push(DeskIcon { icon: Icon::Git, label: "Git", launch: Launch::shell("Git", Icon::Git, Some("lazygit")) });
         }
-        icons.push(DeskIcon { icon: Icon::Recycle, label: "Recycle Bin", launch: Launch::Explorer(home().join(".local/share/Trash/files")) });
+        icons.push(DeskIcon { icon: Icon::Recycle, label: "Trash", launch: Launch::Explorer(home().join(".local/share/Trash/files")) });
         Desktop {
-            th: Theme::load(),
+            th: Theme::load(lite),
+            lite,
             theme_mtime: theme::mtime(),
             theme_check: Instant::now(),
             wins: vec![],
@@ -220,8 +221,6 @@ impl Desktop {
             sel_icon: None,
             last_click: None,
             kbmode: None,
-            splash: Some(Instant::now()),
-            bye: None,
             quit: false,
             docs: vec![],
             clock: clock(),
@@ -229,7 +228,7 @@ impl Desktop {
     }
 
     fn work_h(&self) -> i32 {
-        self.h - 1
+        if self.lite { self.h - 2 } else { self.h - 1 }
     }
 
     fn idx(&self, id: u64) -> Option<usize> {
@@ -329,8 +328,8 @@ impl Desktop {
     pub fn launch(&mut self, l: Launch) {
         let single = match &l {
             Launch::Run => Some("Run"),
-            Launch::ShutDown => Some("Shut Down Windows"),
-            Launch::TaskList => Some("Close Program"),
+            Launch::ShutDown => Some("Quit"),
+            Launch::TaskList => Some("Tasks"),
             _ => None,
         };
         if let Some(t) = single {
@@ -342,7 +341,7 @@ impl Desktop {
         let app: Box<dyn App> = match l {
             Launch::Shell { cmd, cwd, title, icon, keep_open } => match TermApp::new(cmd.as_deref(), cwd, &title, icon, keep_open, &self.th) {
                 Ok(t) => Box::new(t),
-                Err(e) => Box::new(MsgBox::new("MS-DOS Prompt".into(), format!("Cannot start {}:\n{e}", cmd.unwrap_or("the shell".into())))),
+                Err(e) => Box::new(MsgBox::new("Terminal".into(), format!("Cannot start {}:\n{e}", cmd.unwrap_or("the shell".into())))),
             },
             Launch::Notepad(p) => {
                 if let Some(p) = &p {
@@ -357,7 +356,7 @@ impl Desktop {
             Launch::Mines => Box::new(Mines::new()),
             Launch::Explorer(p) => Box::new(Explorer::new(p)),
             Launch::Run => Box::new(Run::new()),
-            Launch::About => Box::new(MsgBox::new("About Windows".into(), about_text(&self.th))),
+            Launch::About => Box::new(MsgBox::new("About".into(), about_text(&self.th))),
             Launch::ShutDown => Box::new(ShutDown::new()),
             Launch::TaskList => Box::new(TaskList::new(self.wins.iter().filter(|w| !w.app.dialog()).map(|w| (w.id, w.title.clone())).collect())),
             Launch::Msg { title, text } => Box::new(MsgBox::new(title, text)),
@@ -375,7 +374,7 @@ impl Desktop {
             ((sw - w) / 2, (sh - h) / 2)
         } else {
             let n = (self.wins.iter().filter(|w| !w.app.dialog()).count() % 8) as i32;
-            let x = (14 + n * 3).min((sw - w).max(0));
+            let x = (if self.lite { 20 } else { 14 } + n * 3).min((sw - w).max(0));
             let y = (1 + n).min((sh - h).max(0));
             (x, y)
         };
@@ -409,16 +408,10 @@ impl Desktop {
                     w.sync();
                 }
             }
-            Action::Restart => {
-                self.wins.clear();
-                self.focus = None;
-                self.menu = None;
-                self.splash = Some(Instant::now());
-            }
             Action::Quit => {
                 self.wins.clear();
                 self.menu = None;
-                self.bye = Some(Instant::now());
+                self.quit = true;
             }
             Action::Many(v) => {
                 for a in v {
@@ -432,22 +425,21 @@ impl Desktop {
 
     fn start_items(&self) -> Vec<Item> {
         let shell = |t: &str, i: Icon, c: Option<&str>| Cmd::Launch(Launch::shell(t, i, c));
-        let mut acc = vec![Item::new("Notepad", Cmd::Launch(Launch::Notepad(None))).icon(Icon::Notepad)];
-        if has("btop") {
-            acc.push(Item::new("System Monitor", shell("System Monitor", Icon::Monitor, Some("btop"))).icon(Icon::Monitor));
-        }
         let mut progs = vec![
-            Item::sub("Accessories", acc).icon(Icon::Programs),
-            Item::sub("Games", vec![Item::new("Minesweeper", Cmd::Launch(Launch::Mines)).icon(Icon::Mines)]).icon(Icon::Programs),
+            Item::new("Notes", Cmd::Launch(Launch::Notepad(None))).icon(Icon::Notepad),
+            Item::new("Mines", Cmd::Launch(Launch::Mines)).icon(Icon::Mines),
         ];
+        if has("btop") {
+            progs.push(Item::new("Monitor", shell("Monitor", Icon::Monitor, Some("btop"))).icon(Icon::Monitor));
+        }
         if has("lazygit") {
             progs.push(Item::new("Git", shell("Git", Icon::Git, Some("lazygit"))).icon(Icon::Git));
         }
-        progs.push(Item::new("MS-DOS Prompt", shell("MS-DOS Prompt", Icon::Terminal, None)).icon(Icon::Terminal));
+        progs.push(Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal));
         if has("nvim") {
             progs.push(Item::new("Vim", shell("Vim", Icon::Vim, Some("nvim"))).icon(Icon::Vim));
         }
-        progs.push(Item::new("Windows Explorer", Cmd::Launch(Launch::Explorer(home()))).icon(Icon::Folder));
+        progs.push(Item::new("Files", Cmd::Launch(Launch::Explorer(home()))).icon(Icon::Folder));
         let docs: Vec<Item> = if self.docs.is_empty() {
             vec![Item::new("(Empty)", Cmd::None).enabled(false)]
         } else {
@@ -458,20 +450,23 @@ impl Desktop {
                 .collect()
         };
         vec![
-            Item::new("MS-DOS Prompt", shell("MS-DOS Prompt", Icon::Terminal, None)).icon(Icon::Terminal),
+            Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal),
             Item::sep(),
             Item::sub("Programs", progs).icon(Icon::Programs),
-            Item::sub("Documents", docs).icon(Icon::Documents),
+            Item::sub("Recent", docs).icon(Icon::Documents),
             Item::sub("Settings", vec![
-                Item::new("Display Properties", Cmd::Desk("props")).icon(Icon::Computer),
+                Item::new("Display", Cmd::Desk("props")).icon(Icon::Computer),
                 Item::new("Reload Theme", Cmd::Desk("theme")).icon(Icon::Settings),
+                Item::sep(),
+                Item::new("Lite Look", Cmd::Desk("lite")).checked(self.lite).key("Alt+L"),
+                Item::new("Classic Look", Cmd::Desk("classic")).checked(!self.lite),
             ])
             .icon(Icon::Settings),
             Item::sub("Find", vec![Item::new("Files or Folders...", Cmd::Desk("find")).icon(Icon::Folder)]).icon(Icon::Help),
             Item::new("Help", Cmd::Desk("help")).icon(Icon::Help),
             Item::new("Run...", Cmd::Launch(Launch::Run)).icon(Icon::Run),
             Item::sep(),
-            Item::new("Shut Down...", Cmd::Launch(Launch::ShutDown)).icon(Icon::Shutdown),
+            Item::new("Quit", Cmd::Launch(Launch::ShutDown)).icon(Icon::Shutdown),
         ]
     }
 
@@ -489,7 +484,7 @@ impl Desktop {
     fn open_start(&mut self) {
         let items = self.start_items();
         let h = items.len() as i32 + 2;
-        self.open_menu(Owner::Start, items, 0, self.work_h() - h, true);
+        self.open_menu(Owner::Start, items, 0, self.work_h() - h, false);
     }
 
     fn open_sys(&mut self, id: u64) {
@@ -519,7 +514,7 @@ impl Desktop {
 
     fn open_desk_menu(&mut self, x: i32, y: i32) {
         let items = vec![
-            Item::new("MS-DOS Prompt Here", Cmd::Launch(Launch::shell("MS-DOS Prompt", Icon::Terminal, None))).icon(Icon::Terminal),
+            Item::new("Terminal Here", Cmd::Launch(Launch::shell("Terminal", Icon::Terminal, None))).icon(Icon::Terminal),
             Item::new("New Text Document", Cmd::Launch(Launch::Notepad(None))).icon(Icon::Notepad),
             Item::sep(),
             Item::new("Refresh", Cmd::Desk("theme")),
@@ -571,6 +566,8 @@ impl Desktop {
             }
             Cmd::Desk(s) => match s {
                 "theme" => self.reload_theme(),
+                "lite" => self.set_lite(true),
+                "classic" => self.set_lite(false),
                 "props" => self.launch(Launch::Msg {
                     title: "Display Properties".into(),
                     text: format!("Theme: {}\n\nColours are read from your current Omarchy theme\nand update live when you switch themes.\n\nScreen area: {} by {} characters", self.th.name, self.w, self.h),
@@ -582,7 +579,7 @@ impl Desktop {
                     icon: Icon::Folder,
                     keep_open: true,
                 }),
-                "help" => self.launch(Launch::Msg { title: "Windows Help".into(), text: HELP.into() }),
+                "help" => self.launch(Launch::Msg { title: "Help".into(), text: HELP.into() }),
                 _ => {}
             },
         }
@@ -692,14 +689,6 @@ impl Desktop {
     }
 
     fn key(&mut self, k: KeyEvent) {
-        if self.bye.is_some() {
-            self.quit = true;
-            return;
-        }
-        if self.splash.is_some() {
-            self.splash = None;
-            return;
-        }
         if let Some((id, size)) = self.kbmode {
             let (sw, sh) = (self.w, self.work_h());
             let step = if k.modifiers.contains(KeyModifiers::SHIFT) { 4 } else { 1 };
@@ -752,6 +741,7 @@ impl Desktop {
                 return;
             }
             KeyCode::Delete if ctrl && alt => return self.launch(Launch::TaskList),
+            KeyCode::Char('l') if alt && !ctrl => return self.set_lite(!self.lite),
             _ => {}
         }
         if let Some(id) = self.focus {
@@ -786,6 +776,10 @@ impl Desktop {
     }
 
     fn icon_slot(&self, i: usize) -> (i32, i32) {
+        if self.lite {
+            let per = ((self.work_h() - 1) / 5).max(1) as usize;
+            return (1 + (i / per) as i32 * 12, 1 + (i % per) as i32 * 5);
+        }
         let per = ((self.work_h() - 1) / 6).max(1) as usize;
         (1 + (i / per) as i32 * 13, 1 + (i % per) as i32 * 6)
     }
@@ -793,7 +787,8 @@ impl Desktop {
     fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
         (0..self.icons.len()).find(|&i| {
             let (ix, iy) = self.icon_slot(i);
-            x >= ix && x < ix + 12 && y >= iy && y < iy + 5
+            let (w, h) = if self.lite { (11, 4) } else { (12, 5) };
+            x >= ix && x < ix + w && y >= iy && y < iy + h
         })
     }
 
@@ -829,12 +824,6 @@ impl Desktop {
 
     fn mouse(&mut self, m: MouseEvent) {
         let (x, y) = (m.column as i32, m.row as i32);
-        if self.bye.is_some() || self.splash.is_some() {
-            if matches!(m.kind, MouseEventKind::Down(_)) {
-                self.key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE));
-            }
-            return;
-        }
         self.hover = Some((x, y));
         match m.kind {
             MouseEventKind::Down(b) => self.mouse_down(b, x, y, m.modifiers),
@@ -1024,7 +1013,7 @@ impl Desktop {
             }
             Drag::Client { id } => self.forward(id, MouseEventKind::Up(b), x, y, mods),
             Drag::Start | Drag::None => {
-                // Press on Start, slide up and release on an item: Windows 95 lets you do that.
+                // Press on the Apps button, slide up and release on an item.
                 if let Some((m, opened)) = &self.menu {
                     if opened.elapsed().as_millis() > 300 {
                         if let Some((lvl, Some(i))) = m.hit(x, y) {
@@ -1074,8 +1063,16 @@ impl Desktop {
 
     // ------------------------------------------------------------ tick
 
+    fn set_lite(&mut self, lite: bool) {
+        self.lite = lite;
+        theme::save_lite(lite);
+        self.reload_theme();
+        let (w, h) = (self.w as u16, self.h as u16);
+        self.resize(w, h);
+    }
+
     fn reload_theme(&mut self) {
-        self.th = Theme::load();
+        self.th = Theme::load(self.lite);
         self.theme_mtime = theme::mtime();
         for w in &mut self.wins {
             w.app.theme_changed(&self.th);
@@ -1114,17 +1111,6 @@ impl Desktop {
                 dirty = true;
             }
         }
-        if let Some(t) = self.splash {
-            dirty = true;
-            if t.elapsed().as_millis() > 2200 {
-                self.splash = None;
-            }
-        }
-        if let Some(t) = self.bye {
-            if t.elapsed().as_millis() > 2500 {
-                self.quit = true;
-            }
-        }
         dirty
     }
 
@@ -1133,18 +1119,22 @@ impl Desktop {
     pub fn render(&mut self, f: &mut Frame) {
         let th = self.th.clone();
         let mut c = Canvas::new(f.buffer_mut());
-        if self.bye.is_some() {
-            self.render_bye(&mut c, &th);
-            return;
-        }
-        if let Some(t) = self.splash {
-            self.render_splash(&mut c, &th, t.elapsed().as_secs_f32());
-            return;
-        }
         c.fill(0, 0, self.w, self.h, st(th.text, th.desk));
         let pal = palette(&th);
         for (i, ic) in self.icons.iter().enumerate() {
             let (x, y) = self.icon_slot(i);
+            if th.lite {
+                let on = self.sel_icon == Some(i);
+                let (_, col) = ic.icon.glyph(&th);
+                let art = Style::new().fg(if on { th.accent } else { col });
+                for (j, line) in ic.icon.lines().iter().enumerate() {
+                    c.text(x + 2, y + j as i32, line, art);
+                }
+                let s = if on { th.sel() } else { Style::new().fg(th.text) };
+                let lw = ic.label.chars().count() as i32;
+                c.text_max(x + (11 - lw) / 2, y + 3, ic.label, s, x + 11);
+                continue;
+            }
             c.pixels(x + 2, y, ic.icon.art(), &pal);
             let on = self.sel_icon == Some(i);
             let s = if on { st(th.on_accent, th.accent) } else { st(th.text, th.desk) };
@@ -1196,6 +1186,9 @@ impl Desktop {
     }
 
     fn render_taskbar(&self, c: &mut Canvas, th: &Theme) {
+        if th.lite {
+            return self.render_taskbar_lite(c, th);
+        }
         let y = self.h - 1;
         c.fill(0, y, self.w, 1, st(th.text, th.face));
         let start_open = matches!(&self.menu, Some((m, _)) if m.owner == Owner::Start);
@@ -1203,7 +1196,7 @@ impl Desktop {
         let bg = if start_open { th.shadow } else { th.button };
         c.put(2, y, "▀", st(th.red, th.blue));
         c.put(3, y, "▀", st(th.green, th.yellow));
-        c.text(5, y, "Start", st(th.text, bg).add_modifier(Modifier::BOLD));
+        c.text(5, y, "Apps", st(th.text, bg).add_modifier(Modifier::BOLD));
         let (v, clock_x) = self.taskbar_layout();
         for (id, bx, bw) in v {
             let Some(w) = self.wins.iter().find(|w| w.id == id) else { continue };
@@ -1224,64 +1217,31 @@ impl Desktop {
         c.put(self.w - 1, y, "▕", st(th.hilite, th.face));
     }
 
-    fn render_splash(&self, c: &mut Canvas, th: &Theme, t: f32) {
-        c.fill(0, 0, self.w, self.h, st(th.text, th.desk));
-        // A waving four-colour flag, drawn in half-block pixels.
-        let (fw, fh) = (24usize, 16usize);
-        let mut rows: Vec<String> = vec![];
-        for py in 0..fh as i32 + 4 {
-            let mut row = String::new();
-            for px in 0..fw as i32 {
-                let wave = ((px as f32 / 4.0) - t * 4.0).sin() * 1.6;
-                let fy = py - 2 - wave.round() as i32;
-                let ch = if fy < 0 || fy >= fh as i32 || px == 11 || px == 12 || fy == 7 || fy == 8 {
-                    '.'
-                } else {
-                    match (px < 12, fy < 8) {
-                        (true, true) => 'r',
-                        (false, true) => 'g',
-                        (true, false) => 'b',
-                        (false, false) => 'y',
-                    }
-                };
-                row.push(ch);
-            }
-            rows.push(row);
-        }
-        let refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
-        let pal = |ch: char| match ch {
-            'r' => Some(th.red),
-            'g' => Some(th.green),
-            'b' => Some(th.blue),
-            'y' => Some(th.yellow),
-            _ => None,
-        };
-        let total_h = rows.len() as i32 / 2 + 5;
-        let top = (self.h - total_h) / 2;
-        c.pixels((self.w - fw as i32) / 2, top, &refs, &pal);
-        let mid = |s: &str| (self.w - s.chars().count() as i32) / 2;
-        let ty = top + rows.len() as i32 / 2 + 1;
-        c.text(mid("Microsoft"), ty, "Microsoft", st(th.dim, th.desk));
-        let big = "W i n d o w s  9 5";
-        c.text(mid(big), ty + 1, big, st(th.text, th.desk).add_modifier(Modifier::BOLD));
-        c.text(mid("TUI Edition"), ty + 2, "TUI Edition", st(th.accent, th.desk));
-        // The scrolling bar along the bottom.
-        let span = 24;
-        let off = ((t * 40.0) as i32).rem_euclid(self.w + span) - span;
+    fn render_taskbar_lite(&self, c: &mut Canvas, th: &Theme) {
+        let y = self.h - 1;
+        let line = Style::new().fg(th.dim);
+        c.fill(0, y - 1, self.w, 2, Style::new());
         for x in 0..self.w {
-            let on = x >= off && x < off + span;
-            c.put(x, self.h - 1, "▀", Style::new().fg(if on { th.accent } else { th.face }).bg(th.desk));
+            c.put(x, y - 1, "─", line);
         }
-    }
-
-    fn render_bye(&self, c: &mut Canvas, th: &Theme) {
-        c.fill(0, 0, self.w, self.h, Style::new().bg(th.desk));
-        let s = st(th.yellow, th.desk).add_modifier(Modifier::BOLD);
-        let a = "It's now safe to turn off";
-        let b = "your computer.";
-        let y = self.h / 2 - 1;
-        c.text((self.w - a.len() as i32) / 2, y, a, s);
-        c.text((self.w - b.len() as i32) / 2, y + 1, b, s);
+        let start_open = matches!(&self.menu, Some((m, _)) if m.owner == Owner::Start);
+        let s = if start_open { th.sel() } else { Style::new().fg(th.accent).add_modifier(Modifier::BOLD) };
+        c.fill(0, y, 10, 1, s);
+        c.text(2, y, "❖ Apps", s);
+        c.put(10, y, "│", line);
+        let (v, clock_x) = self.taskbar_layout();
+        for (id, bx, bw) in v {
+            let Some(w) = self.wins.iter().find(|w| w.id == id) else { continue };
+            let active = self.focus == Some(id) && !w.min;
+            let s = if active { th.sel() } else if w.min { Style::new().fg(th.dim) } else { Style::new().fg(th.text) };
+            c.fill(bx, y, bw, 1, s);
+            let (g, col) = w.app.icon().glyph(th);
+            c.put_c(bx + 1, y, g, if active { s } else { Style::new().fg(col) });
+            c.text_max(bx + 3, y, &w.title, s, bx + bw - 1);
+            c.put(bx + bw, y, "│", line);
+        }
+        c.put(clock_x, y, "│", line);
+        c.text(clock_x + 2, y, &self.clock, Style::new().fg(th.text));
     }
 }
 
@@ -1308,6 +1268,9 @@ fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, focused: bool, pressed: 
         w.app.render(&mut wc, th, focused);
     }
     c.blit(&w.buf, cx, cy);
+    if th.lite {
+        return draw_frame_lite(c, th, w, focused, pressed, open_bar);
+    }
     let (x, y, ww, hh) = (w.x, w.y, w.w, w.h);
     // Title bar.
     let (tbg, tfg) = if focused { (th.accent, th.on_accent) } else { (th.inactive, th.on_inactive) };
@@ -1347,6 +1310,52 @@ fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, focused: bool, pressed: 
             }
             let on = open_bar == Some(i);
             let s = if on { st(th.on_accent, th.accent) } else { st(th.text, th.face) };
+            c.fill(x + 1 + bx, y + 1, bw, 1, s);
+            let mut chars = label.chars();
+            if let Some(first) = chars.next() {
+                c.put_c(x + 2 + bx, y + 1, first, s.add_modifier(Modifier::UNDERLINED));
+                c.text(x + 3 + bx, y + 1, chars.as_str(), s);
+            }
+        }
+    }
+}
+
+fn draw_frame_lite(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed: Option<Part>, open_bar: Option<usize>) {
+    let (x, y, ww, hh) = (w.x, w.y, w.w, w.h);
+    let line = Style::new().fg(if focused { th.accent } else { th.dim });
+    c.frame(x, y, ww, hh, line);
+    let ts = if focused { Style::new().fg(th.accent).add_modifier(Modifier::BOLD) } else { Style::new().fg(th.dim) };
+    let r = w.buttons_x();
+    let dialog = w.app.dialog();
+    let title_end = if dialog { r - 3 } else if w.app.resizable() { r - 10 } else { r - 7 };
+    let (g, _) = w.app.icon().glyph(th);
+    c.put(x + 1, y, " ", ts);
+    c.put_c(x + 2, y, g, ts);
+    c.put(x + 3, y, " ", ts);
+    let end = c.text_max(x + 4, y, &w.title, ts, title_end);
+    if end < title_end {
+        c.put(end, y, " ", ts);
+    }
+    let btn = |c: &mut Canvas, bx: i32, label: &str, part: Part| {
+        let s = if pressed == Some(part) { ts.add_modifier(Modifier::REVERSED) } else { ts };
+        c.text(bx, y, label, s);
+    };
+    btn(c, r - 2, " × ", Part::Close);
+    if !dialog {
+        c.put(r - 3, y, " ", ts);
+        if w.app.resizable() {
+            btn(c, r - 6, if w.max { " ❐ " } else { " □ " }, Part::Max);
+        }
+        btn(c, if w.app.resizable() { r - 9 } else { r - 6 }, " _ ", Part::Min);
+    }
+    if w.has_bar {
+        let menus = w.app.menubar();
+        c.fill(x + 1, y + 1, ww - 2, 1, Style::new());
+        for (i, ((bx, bw), (label, _))) in bar_layout(&menus).into_iter().zip(menus.iter()).enumerate() {
+            if x + 1 + bx + bw > x + ww - 1 {
+                break;
+            }
+            let s = if open_bar == Some(i) { th.sel() } else { Style::new().fg(th.text) };
             c.fill(x + 1 + bx, y + 1, bw, 1, s);
             let mut chars = label.chars();
             if let Some(first) = chars.next() {

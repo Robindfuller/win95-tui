@@ -44,6 +44,22 @@ impl Icon {
         }
     }
 
+    /// Line and braille drawing for the Lite desktop, 7 wide by 3 tall.
+    pub fn lines(self) -> [&'static str; 3] {
+        match self {
+            Icon::Computer => ["╭─────╮", "╰──┬──╯", " ──┴── "],
+            Icon::Folder | Icon::Programs | Icon::Documents => ["╭──╮   ", "│  ╰──╮", "╰─────╯"],
+            Icon::Terminal => ["╭─────╮", "│ ❯ _ │", "╰─────╯"],
+            Icon::Notepad | Icon::File => ["┌────╮ ", "│ ══ │ ", "└────┘ "],
+            Icon::Mines => ["   ╲   ", " ⣴⣿⣿⣦  ", " ⠻⣿⣿⠟  "],
+            Icon::Monitor => ["╭─────╮", "│⣀⡠⠔⠊⠉│", "╰─────╯"],
+            Icon::Git => [" ●──╮  ", " │  ●  ", " ●──╯  "],
+            Icon::Recycle => ["╶─────╴", " │┊┊┊│ ", " ╰───╯ "],
+            Icon::Vim => [" ╲   ╱ ", "  ╲ ╱  ", "   V   "],
+            _ => ["╭─────╮", "│  ?  │", "╰─────╯"],
+        }
+    }
+
     pub fn art(self) -> &'static [&'static str] {
         match self {
             Icon::Computer => &[

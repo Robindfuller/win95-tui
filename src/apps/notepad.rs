@@ -101,7 +101,7 @@ impl Notepad {
 impl App for Notepad {
     fn title(&self) -> String {
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or("Untitled".into());
-        format!("{}{} - Notepad", name, if self.modified { "*" } else { "" })
+        format!("{}{} - Notes", name, if self.modified { "*" } else { "" })
     }
     fn icon(&self) -> Icon {
         Icon::Notepad
@@ -267,7 +267,7 @@ impl App for Notepad {
                 Item::new("Exit", Cmd::Sys(Sys::Close)),
             ]),
             ("Edit", vec![Item::new("Time/Date", Cmd::App("date")).key("F5")]),
-            ("Help", vec![Item::new("About Notepad", Cmd::App("about")).icon(Icon::Info)]),
+            ("Help", vec![Item::new("About Notes", Cmd::App("about")).icon(Icon::Info)]),
         ]
     }
 
@@ -284,7 +284,7 @@ impl App for Notepad {
                 Action::None
             }
             "date" => self.key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
-            "about" => Action::Launch(Launch::Msg { title: "About Notepad".into(), text: "Notepad\nA plain text editor.\n\nCtrl+S save, F5 inserts the time and date.".into() }),
+            "about" => Action::Launch(Launch::Msg { title: "About Notes".into(), text: "Notes\nA plain text editor.\n\nCtrl+S save, F5 inserts the time and date.".into() }),
             _ => Action::None,
         }
     }

@@ -34,7 +34,6 @@ pub enum Action {
     CloseWin(u64),
     Launch(Launch),
     Resize(u16, u16),
-    Restart,
     Quit,
     Many(Vec<Action>),
 }

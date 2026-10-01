@@ -22,7 +22,15 @@ fn main() -> anyhow::Result<()> {
         execute!(stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
     }
     let size = terminal.size()?;
-    let mut desk = wm::Desktop::new(size.width, size.height);
+    let args: Vec<String> = std::env::args().collect();
+    let lite = if args.iter().any(|a| a == "--classic") {
+        false
+    } else if args.iter().any(|a| a == "--lite") {
+        true
+    } else {
+        theme::saved_lite()
+    };
+    let mut desk = wm::Desktop::new(size.width, size.height, lite);
     let res = run(&mut terminal, &mut desk);
     if kb {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);

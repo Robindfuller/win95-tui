@@ -1,8 +1,7 @@
-// Small fixed-size dialogs: Run, About, Shut Down, Close Program and message boxes.
+// Small fixed-size dialogs: Run, About, Quit, the task list and message boxes.
 use super::{notepad::expand, Action, App, Launch};
 use crate::{draw::{st, Canvas}, icons::{palette, Icon}, theme::{home, Theme}};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::style::Modifier;
 use std::{fs, path::PathBuf};
 
 /// A row of right-aligned buttons along the bottom of a dialog.
@@ -49,6 +48,13 @@ impl Buttons {
 }
 
 fn icon_art(c: &mut Canvas, th: &Theme, x: i32, y: i32, icon: Icon) {
+    if th.lite {
+        let (_, col) = icon.glyph(th);
+        for (j, line) in icon.lines().iter().enumerate() {
+            c.text(x, y + j as i32, line, ratatui::style::Style::new().fg(col));
+        }
+        return;
+    }
     let pal = palette(th);
     c.pixels(x, y, icon.art(), &pal);
 }
@@ -95,12 +101,12 @@ pub fn parse_run(s: &str) -> Launch {
         None => (s, None),
     };
     match prog.to_lowercase().as_str() {
-        "notepad" | "notepad.exe" => Launch::Notepad(arg.map(expand)),
-        "winmine" | "winmine.exe" | "minesweeper" => Launch::Mines,
-        "explorer" | "explorer.exe" => Launch::Explorer(arg.map(expand).unwrap_or_else(home)),
-        "winver" => Launch::About,
-        "taskman" => Launch::TaskList,
-        "command" | "command.com" | "cmd" => Launch::shell("MS-DOS Prompt", Icon::Terminal, None),
+        "notepad" | "notes" => Launch::Notepad(arg.map(expand)),
+        "mines" | "minesweeper" => Launch::Mines,
+        "files" | "explorer" => Launch::Explorer(arg.map(expand).unwrap_or_else(home)),
+        "about" => Launch::About,
+        "tasks" => Launch::TaskList,
+        "terminal" | "term" => Launch::shell("Terminal", Icon::Terminal, None),
         _ => {
             let p = expand(s);
             if arg.is_none() && p.is_dir() {
@@ -132,8 +138,8 @@ impl App for Run {
         let s = st(th.text, th.face);
         c.fill(0, 0, w, h, s);
         icon_art(c, th, 2, 1, Icon::Run);
-        c.text(12, 1, "Type the name of a program, folder, or", s);
-        c.text(12, 2, "document, and Windows will open it for you.", s);
+        c.text(12, 1, "Type a command, folder or file", s);
+        c.text(12, 2, "and it opens in its own window.", s);
         let x = c.text(2, 4, "Open:", s);
         c.field(x + 2, 4, w - x - 4, &self.input, th);
         self.buttons.render(c, th, w, h - 1);
@@ -254,59 +260,39 @@ pub fn about_text(th: &Theme) -> String {
         mem.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0)
     };
     let (total, avail) = (field("MemTotal:"), field("MemAvailable:"));
-    let commas = |n: u64| {
-        let s = n.to_string();
-        let mut out = String::new();
-        for (i, ch) in s.chars().enumerate() {
-            if i > 0 && (s.len() - i) % 3 == 0 {
-                out.push(',');
-            }
-            out.push(ch);
-        }
-        out
-    };
     let user = std::env::var("USER").unwrap_or_default();
     let host = fs::read_to_string("/etc/hostname").unwrap_or_default().trim().to_string();
     let free = if total > 0 { avail * 100 / total } else { 0 };
     format!(
-        "Windows 95, TUI Edition\nRunning in your terminal, themed by Omarchy.\n\nThis product is licensed to:\n    {user}\n    {host}\n\nPhysical memory available to Windows: {} KB\nSystem resources: {}% Free\nTheme: {}",
-        commas(total),
-        free,
-        th.name
+        "Desktop TUI\nThemed by Omarchy ({}).\n\n{user}@{host}\nMemory: {:.1} GB, {}% free",
+        th.name,
+        total as f64 / 1048576.0,
+        free
     )
 }
 
-// ---------------------------------------------------------------- Shut Down
+// ---------------------------------------------------------------- Quit
 
 pub struct ShutDown {
-    choice: usize,
     buttons: Buttons,
     size: (u16, u16),
 }
 
-const CHOICES: [&str; 3] = ["Shut down the computer?", "Restart the computer?", "Close all programs and log on as a different user?"];
-
 impl ShutDown {
     pub fn new() -> ShutDown {
-        ShutDown { choice: 0, buttons: Buttons::new(&["Yes", "No"]), size: (0, 0) }
-    }
-    fn go(&self) -> Action {
-        match self.choice {
-            0 => Action::Quit,
-            _ => Action::Restart,
-        }
+        ShutDown { buttons: Buttons::new(&["Quit", "Cancel"]), size: (0, 0) }
     }
 }
 
 impl App for ShutDown {
     fn title(&self) -> String {
-        "Shut Down Windows".into()
+        "Quit".into()
     }
     fn icon(&self) -> Icon {
         Icon::Shutdown
     }
     fn size_hint(&self) -> (u16, u16) {
-        (68, 8)
+        (44, 5)
     }
     fn resizable(&self) -> bool {
         false
@@ -318,38 +304,25 @@ impl App for ShutDown {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let s = st(th.text, th.face);
         c.fill(0, 0, w, h, s);
-        icon_art(c, th, 2, 1, Icon::Computer);
-        c.text(12, 1, "Are you sure you want to:", s);
-        for (i, l) in CHOICES.iter().enumerate() {
-            let on = i == self.choice;
-            let y = 2 + i as i32;
-            c.text(13, y, if on { "(•)" } else { "( )" }, s);
-            c.text(17, y, l, if on { s.add_modifier(Modifier::BOLD) } else { s });
-        }
+        c.text(2, 1, "Close every window and quit?", s);
         self.buttons.render(c, th, w, h - 1);
     }
     fn key(&mut self, k: KeyEvent) -> Action {
         match k.code {
-            KeyCode::Esc => return Action::Close,
-            KeyCode::Up => self.choice = self.choice.saturating_sub(1),
-            KeyCode::Down => self.choice = (self.choice + 1).min(2),
-            KeyCode::Char('y') => return self.go(),
-            KeyCode::Char('n') => return Action::Close,
+            KeyCode::Esc | KeyCode::Char('n') => Action::Close,
+            KeyCode::Char('y') | KeyCode::Char('q') => Action::Quit,
             _ => match self.buttons.key(&k) {
-                Some(0) => return self.go(),
-                Some(_) => return Action::Close,
-                None => {}
+                Some(0) => Action::Quit,
+                Some(_) => Action::Close,
+                None => Action::None,
             },
         }
-        Action::None
     }
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, _m: KeyModifiers) -> Action {
         if let MouseEventKind::Down(MouseButton::Left) = kind {
-            if (2..5).contains(&y) && x >= 12 {
-                self.choice = (y - 2) as usize;
-            } else if y == self.size.1 as i32 - 1 {
+            if y == self.size.1 as i32 - 1 {
                 match self.buttons.hit(self.size.0 as i32, x) {
-                    Some(0) => return self.go(),
+                    Some(0) => return Action::Quit,
                     Some(_) => return Action::Close,
                     None => {}
                 }
@@ -362,7 +335,7 @@ impl App for ShutDown {
     }
 }
 
-// ---------------------------------------------------------------- Close Program (Ctrl+Alt+Del)
+// ---------------------------------------------------------------- Task list (Ctrl+Alt+Del)
 
 pub struct TaskList {
     tasks: Vec<(u64, String)>,
@@ -373,7 +346,7 @@ pub struct TaskList {
 
 impl TaskList {
     pub fn new(tasks: Vec<(u64, String)>) -> TaskList {
-        TaskList { tasks, sel: 0, buttons: Buttons::new(&["End Task", "Shut Down", "Cancel"]), size: (0, 0) }
+        TaskList { tasks, sel: 0, buttons: Buttons::new(&["End Task", "Quit", "Cancel"]), size: (0, 0) }
     }
     fn act(&mut self, b: usize) -> Action {
         match b {
@@ -393,7 +366,7 @@ impl TaskList {
 
 impl App for TaskList {
     fn title(&self) -> String {
-        "Close Program".into()
+        "Tasks".into()
     }
     fn icon(&self) -> Icon {
         Icon::Monitor
@@ -415,12 +388,11 @@ impl App for TaskList {
         c.fill(1, 0, w - 2, h - 5, list);
         for (i, (_, t)) in self.tasks.iter().enumerate().take((h - 5) as usize) {
             let on = i == self.sel;
-            let ss = if on { st(th.on_accent, th.accent) } else { list };
+            let ss = if on { th.sel() } else { list };
             c.fill(1, i as i32, w - 2, 1, ss);
             c.text_max(2, i as i32, t, ss, w - 2);
         }
-        c.text(1, h - 4, "WARNING: Ctrl+Alt+Del again will not restart", st(th.dim, th.face));
-        c.text(1, h - 3, "your computer. It just opens this box.", st(th.dim, th.face));
+        c.text(1, h - 3, "Pick a window and End Task to close it.", st(th.dim, th.face));
         self.buttons.render(c, th, w, h - 1);
     }
     fn key(&mut self, k: KeyEvent) -> Action {

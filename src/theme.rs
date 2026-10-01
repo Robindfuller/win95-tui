@@ -1,10 +1,14 @@
 // Colours come from the live Omarchy theme, so the desktop follows theme switches.
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
 
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub name: String,
+    /// Lite look: no filled backgrounds, line borders, text icons.
+    pub lite: bool,
+    pub fg_hex: String,
+    pub bg_hex: String,
     pub desk: Color,
     pub face: Color,
     pub hilite: Color,
@@ -34,6 +38,21 @@ pub fn home() -> PathBuf {
 
 fn state_dir() -> PathBuf {
     home().join(".local/state/omarchy/current")
+}
+
+fn settings_path() -> PathBuf {
+    home().join(".config/win95-tui/settings")
+}
+
+/// The saved look; Lite unless the user picked Classic.
+pub fn saved_lite() -> bool {
+    !fs::read_to_string(settings_path()).is_ok_and(|s| s.lines().any(|l| l.trim() == "style=classic"))
+}
+
+pub fn save_lite(lite: bool) {
+    let p = settings_path();
+    let _ = fs::create_dir_all(p.parent().unwrap());
+    let _ = fs::write(p, format!("style={}\n", if lite { "lite" } else { "classic" }));
 }
 
 pub fn colors_path() -> PathBuf {
@@ -80,7 +99,16 @@ fn c(v: Rgb) -> Color {
 }
 
 impl Theme {
-    pub fn load() -> Theme {
+    /// Style for a selected row or item.
+    pub fn sel(&self) -> Style {
+        if self.lite {
+            Style::new().fg(self.text).bg(self.inactive).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(self.on_accent).bg(self.accent)
+        }
+    }
+
+    pub fn load(lite: bool) -> Theme {
         let mut map: HashMap<String, Rgb> = HashMap::new();
         if let Ok(txt) = fs::read_to_string(colors_path()) {
             for line in txt.lines() {
@@ -106,8 +134,12 @@ impl Theme {
         let name = fs::read_to_string(state_dir().join("theme.name"))
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "default".into());
-        Theme {
+        let hx = |v: Rgb| format!("{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}", v.0, v.0, v.1, v.1, v.2, v.2);
+        let mut th = Theme {
             name,
+            lite,
+            fg_hex: hx(fg),
+            bg_hex: hx(bg),
             desk: c(darker),
             face: c(lighter),
             hilite: c(mix(lighter, fg, 0.35)),
@@ -129,13 +161,14 @@ impl Theme {
             blue: c(get("blue", "#78824b")),
             magenta: c(get("magenta", "#bb7744")),
             orange: c(get("orange", "#8d6242")),
+        };
+        if lite {
+            for col in [&mut th.desk, &mut th.face, &mut th.client, &mut th.button, &mut th.tile_a, &mut th.tile_b, &mut th.text] {
+                *col = Color::Reset;
+            }
+            th.hilite = th.dim;
+            th.shadow = th.dim;
         }
-    }
-
-    pub fn rgb_hex(col: Color) -> String {
-        match col {
-            Color::Rgb(r, g, b) => format!("{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}", r, r, g, g, b, b),
-            _ => "0000/0000/0000".into(),
-        }
+        th
     }
 }

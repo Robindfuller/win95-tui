@@ -1,6 +1,5 @@
-// Cascading pop-up menus: the Start menu, window system menus and app menu bars.
+// Cascading pop-up menus: the Apps menu, window menus and app menu bars.
 use crate::{apps::Launch, draw::{st, Canvas}, icons::Icon, theme::Theme};
-use ratatui::style::Modifier;
 
 #[derive(Clone, Debug)]
 pub enum Cmd {
@@ -125,19 +124,6 @@ impl Level {
         let (w, h) = (self.width(), self.height());
         c.fill(self.x, self.y, w, h, st(th.text, th.face));
         c.bevel(self.x, self.y, w, h, th, true);
-        if self.banner {
-            let bx = self.x + 1;
-            c.fill(bx, self.y + 1, 2, h - 2, st(th.on_accent, th.accent));
-            let word: Vec<char> = "Windows95".chars().collect();
-            let start = self.y + h - 1 - word.len() as i32;
-            for (i, ch) in word.iter().enumerate() {
-                let y = start + i as i32;
-                if y > self.y {
-                    let s = st(th.on_accent, th.accent).add_modifier(if i >= 7 { Modifier::BOLD } else { Modifier::empty() });
-                    c.put_c(bx, y, *ch, s);
-                }
-            }
-        }
         let ix = self.inner_x();
         let iw = self.x + w - 1 - ix;
         for (i, it) in self.items.iter().enumerate() {
@@ -146,10 +132,14 @@ impl Level {
                 for x in ix..ix + iw {
                     c.put(x, y, "─", st(th.dim, th.face));
                 }
+                if th.lite {
+                    c.put(self.x, y, "├", st(th.dim, th.face));
+                    c.put(self.x + w - 1, y, "┤", st(th.dim, th.face));
+                }
                 continue;
             }
             let on = self.sel == Some(i);
-            let (fg, bg) = if on { (th.on_accent, th.accent) } else if it.enabled { (th.text, th.face) } else { (th.dim, th.face) };
+            let (fg, bg) = if on && th.lite { (th.text, th.inactive) } else if on { (th.on_accent, th.accent) } else if it.enabled { (th.text, th.face) } else { (th.dim, th.face) };
             c.fill(ix, y, iw, 1, st(fg, bg));
             if it.checked {
                 c.put(ix + 1, y, "✓", st(fg, bg));
