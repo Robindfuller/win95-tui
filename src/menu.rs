@@ -20,6 +20,10 @@ pub enum Sys {
     Minimize,
     Maximize,
     Close,
+    /// tiling desktop: float or tile, fullscreen, send to a workspace
+    Float,
+    Full,
+    ToWs(usize),
 }
 
 #[derive(Clone, Debug)]

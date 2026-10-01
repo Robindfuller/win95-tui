@@ -1,8 +1,11 @@
 // The window manager: desktop icons, overlapping windows, taskbar and menus.
+mod tiling;
+
 use crate::{
     apps::{
         dialogs::{about_text, AddProgram, MsgBox, Run, ShutDown, TaskList},
         explorer::Explorer,
+        launcher::Launcher,
         mines::Mines,
         notepad::Notepad,
         term::TermApp,
@@ -40,6 +43,16 @@ pub struct Win {
     has_bar: bool,
     buf: Buffer,
     title: String,
+    /// tiling desktop: its workspace, and floating, tiled or fullscreen
+    ws: usize,
+    float: bool,
+    tiled: bool,
+    full: bool,
+    /// on another workspace, or behind a fullscreen window
+    hidden: bool,
+    /// what the dock knows it as, and how to start another
+    key: String,
+    relaunch: Option<Launch>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -62,7 +75,7 @@ impl Win {
     }
 
     fn contains(&self, x: i32, y: i32) -> bool {
-        !self.min && x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+        !self.min && !self.hidden && x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 
     fn sync(&mut self) {
@@ -83,7 +96,7 @@ impl Win {
             return None;
         }
         let r = self.buttons_x();
-        let dialog = self.app.dialog();
+        let dialog = self.app.dialog() || self.tiled;
         if y == self.y {
             if x == self.x + 1 || x == self.x + 2 {
                 return Some(Part::Icon);
@@ -102,7 +115,7 @@ impl Win {
         }
         let (left, right, bottom) = (x == self.x, x == self.x + self.w - 1, y == self.y + self.h - 1);
         if left || right || bottom {
-            return Some(if self.app.resizable() && !self.max { Part::Edge(left, right, bottom) } else { Part::Frame });
+            return Some(if self.app.resizable() && !self.max && !self.tiled { Part::Edge(left, right, bottom) } else { Part::Frame });
         }
         if self.has_bar && y == self.y + 1 {
             return Some(Part::Bar(x - self.x - 1));
@@ -147,6 +160,10 @@ enum Drag {
     Button { id: u64, part: Part },
     Client { id: u64 },
     Start,
+    /// tiling: a window held by its title, to drop on another and swap
+    Swap { id: u64 },
+    /// tiling: the line between tiles, to make one bigger
+    Split(tiling::Split),
 }
 
 enum TaskHit {
@@ -185,6 +202,15 @@ pub struct Desktop {
     clock: String,
     /// the programs you added: name, command, icon
     mine: Vec<(String, String, Icon)>,
+    /// the Omarchy desktop: tiled windows, a top bar and a dock
+    tiling: bool,
+    cur_ws: usize,
+    /// windows in tiling order; each workspace takes its own in turn
+    order: Vec<u64>,
+    /// how each workspace's splits are shared out
+    ratios: Vec<Vec<f32>>,
+    dock_open: bool,
+    battery: Option<String>,
 }
 
 /// A text web browser to open in a window, if one is installed.
@@ -210,6 +236,15 @@ Ctrl+Alt+Del        Task list\n\
 Shift+PgUp/PgDn     Scroll back in a terminal\n\
 Double-click title  Maximise\n\
 Alt+L               Lite or Classic look\n\n\
+Omarchy desktop (Apps > Settings): tiled windows,\n\
+a bar on top and a dock at the bottom edge.\n\
+Alt+Enter           Terminal\n\
+Alt+Space           Launcher\n\
+Alt+W               Close window\n\
+Alt+1..9            Workspace (Shift moves the window)\n\
+Alt+Arrows          Focus (Shift swaps)\n\
+Alt+F / Alt+T       Fullscreen / float\n\
+Super works too where your terminal passes it on.\n\n\
 Colours follow your Omarchy theme as it changes.";
 
 const FIND: &str = r#"printf 'Named: '; read -r q; [ -n "" ] && find ~ -iname "**" -not -path '*/.*' 2>/dev/null | sed "s|^/home/rdf|~|" | head -500"#;
@@ -238,7 +273,14 @@ impl Desktop {
             docs: vec![],
             clock: clock(),
             mine: vec![],
+            tiling: false,
+            cur_ws: 0,
+            order: vec![],
+            ratios: vec![vec![]; tiling::WORKSPACES],
+            dock_open: false,
+            battery: None,
         };
+        d.tick_tiling();
         d.refresh_programs();
         d
     }
@@ -278,7 +320,13 @@ impl Desktop {
     }
 
     fn work_h(&self) -> i32 {
-        if self.lite { self.h - 2 } else { self.h - 1 }
+        if self.tiling {
+            self.h
+        } else if self.lite {
+            self.h - 2
+        } else {
+            self.h - 1
+        }
     }
 
     fn idx(&self, id: u64) -> Option<usize> {
@@ -290,7 +338,7 @@ impl Desktop {
     }
 
     fn top_visible(&self) -> Option<u64> {
-        self.wins.iter().rev().find(|w| !w.min).map(|w| w.id)
+        self.wins.iter().rev().find(|w| !w.min && !w.hidden).map(|w| w.id)
     }
 
     // ------------------------------------------------------------ window ops
@@ -299,9 +347,22 @@ impl Desktop {
         if let Some(i) = self.idx(id) {
             let mut w = self.wins.remove(i);
             w.min = false;
+            let (ws, tiled) = (w.ws, !w.float);
             self.wins.push(w);
             self.focus = Some(id);
             self.sel_icon = None;
+            if self.tiling {
+                if ws != self.cur_ws {
+                    self.cur_ws = ws;
+                }
+                // focusing a tile behind a fullscreen window brings it out
+                if tiled && self.full_win().is_some_and(|f| f != id) {
+                    for w in &mut self.wins {
+                        w.full = false;
+                    }
+                }
+                self.relayout();
+            }
         }
     }
 
@@ -315,6 +376,9 @@ impl Desktop {
     }
 
     fn toggle_max(&mut self, id: u64) {
+        if self.tiling {
+            return self.toggle_full(id);
+        }
         let (sw, sh) = (self.w, self.work_h());
         let Some(w) = self.win(id) else { return };
         if !w.app.resizable() {
@@ -389,6 +453,7 @@ impl Desktop {
         if let Some(i) = self.idx(id) {
             self.wins.remove(i);
         }
+        self.order.retain(|o| *o != id);
         if let Some((m, _)) = &self.menu {
             if matches!(m.owner, Owner::Sys(o) | Owner::Bar(o, _) if o == id) {
                 self.menu = None;
@@ -400,6 +465,7 @@ impl Desktop {
         if self.focus == Some(id) {
             self.focus = self.top_visible();
         }
+        self.relayout();
     }
 
     fn sys(&mut self, id: u64, s: Sys) {
@@ -424,6 +490,9 @@ impl Desktop {
                 }
             }
             Sys::Close => self.close(id),
+            Sys::Float => self.toggle_float(id),
+            Sys::Full => self.toggle_full(id),
+            Sys::ToWs(n) => self.move_to_ws(id, n),
         }
     }
 
@@ -433,6 +502,7 @@ impl Desktop {
             Launch::AddProgram => Some("Add Program"),
             Launch::ShutDown => Some("Quit"),
             Launch::TaskList => Some("Tasks"),
+            Launch::Launcher => Some("Launch"),
             _ => None,
         };
         if let Some(t) = single {
@@ -441,6 +511,8 @@ impl Desktop {
                 return;
             }
         }
+        let key = tiling::launch_key(&l);
+        let relaunch = key.as_ref().map(|_| l.clone());
         let app: Box<dyn App> = match l {
             Launch::Shell { cmd, cwd, title, icon, keep_open } => match TermApp::new(cmd.as_deref(), cwd, &title, icon, keep_open, &self.th) {
                 Ok(t) => Box::new(t),
@@ -463,9 +535,16 @@ impl Desktop {
             Launch::About => Box::new(MsgBox::new("About".into(), about_text(&self.th))),
             Launch::ShutDown => Box::new(ShutDown::new()),
             Launch::TaskList => Box::new(TaskList::new(self.wins.iter().filter(|w| !w.app.dialog()).map(|w| (w.id, w.title.clone())).collect())),
+            Launch::Launcher => Box::new(Launcher::new(self.launcher_items())),
             Launch::Msg { title, text } => Box::new(MsgBox::new(title, text)),
         };
         self.add(app);
+        if let Some(w) = self.wins.last_mut() {
+            if let Some(k) = key {
+                w.key = k;
+            }
+            w.relaunch = relaunch;
+        }
     }
 
     fn add(&mut self, app: Box<dyn App>) {
@@ -474,8 +553,9 @@ impl Desktop {
         let (sw, sh) = (self.w, self.work_h());
         let w = (cw as i32 + 2).min(sw);
         let h = (ch as i32 + 2 + has_bar as i32).min(sh);
-        let (x, y) = if app.dialog() {
-            ((sw - w) / 2, (sh - h) / 2)
+        let float = app.dialog() || !app.resizable();
+        let (x, y) = if app.dialog() || self.tiling && float {
+            ((sw - w) / 2, ((sh - h) / 2).max(self.tiling as i32))
         } else {
             let n = (self.wins.iter().filter(|w| !w.app.dialog()).count() % 8) as i32;
             let x = (if self.lite { 20 } else { 14 } + n * 3).min((sw - w).max(0));
@@ -485,10 +565,38 @@ impl Desktop {
         let id = self.next_id;
         self.next_id += 1;
         let title = app.title();
-        let big = app.resizable() && (cw as i32 + 2 > sw || ch as i32 + 2 + has_bar as i32 > sh);
-        let mut win = Win { id, x, y, w, h, restore: None, max: false, snapped: false, min: false, app, has_bar, buf: Buffer::empty(Rect::new(0, 0, 1, 1)), title };
+        let big = !self.tiling && app.resizable() && (cw as i32 + 2 > sw || ch as i32 + 2 + has_bar as i32 > sh);
+        let key = title.clone();
+        let mut win = Win {
+            id,
+            x,
+            y,
+            w,
+            h,
+            restore: None,
+            max: false,
+            snapped: false,
+            min: false,
+            app,
+            has_bar,
+            buf: Buffer::empty(Rect::new(0, 0, 1, 1)),
+            title,
+            ws: self.cur_ws,
+            float,
+            tiled: false,
+            full: false,
+            hidden: false,
+            key,
+            relaunch: None,
+        };
         win.sync();
         self.wins.push(win);
+        // a new tile goes in after the focused one, like Hyprland splitting it
+        let after = self.focus.and_then(|f| self.order.iter().position(|o| *o == f));
+        match after {
+            Some(i) => self.order.insert(i + 1, id),
+            None => self.order.push(id),
+        }
         self.focus_win(id);
         if big {
             self.toggle_max(id);
@@ -578,6 +686,9 @@ impl Desktop {
                 Item::sep(),
                 Item::new("Lite Look", Cmd::Desk("lite")).checked(self.lite).key("Alt+L"),
                 Item::new("Classic Look", Cmd::Desk("classic")).checked(!self.lite),
+                Item::sep(),
+                Item::new("Windows Desktop", Cmd::Desk("windows")).checked(!self.tiling),
+                Item::new("Omarchy Desktop", Cmd::Desk("omarchy")).checked(self.tiling),
             ])
             .icon(Icon::Settings),
             Item::sub("Find", vec![Item::new("Files or Folders...", Cmd::Desk("find")).icon(Icon::Folder)]).icon(Icon::Help),
@@ -604,12 +715,45 @@ impl Desktop {
     fn open_start(&mut self) {
         let items = self.start_items();
         let h = items.len() as i32 + 2;
-        self.open_menu(Owner::Start, items, 0, self.work_h() - h, false);
+        let y = if self.tiling { 1 } else { self.work_h() - h };
+        self.open_menu(Owner::Start, items, 0, y, false);
+    }
+
+    /// Everything on the Apps menu that starts something, for the launcher.
+    fn launcher_items(&self) -> Vec<(String, Icon, Launch)> {
+        fn walk(items: &[Item], out: &mut Vec<(String, Icon, Launch)>) {
+            for it in items {
+                if let Cmd::Launch(l) = &it.cmd {
+                    let name = it.label.trim_end_matches("...").to_string();
+                    if !matches!(l, Launch::Launcher) && !out.iter().any(|(n, _, _)| *n == name) {
+                        out.push((name, it.icon.unwrap_or(Icon::Run), l.clone()));
+                    }
+                }
+                walk(&it.sub, out);
+            }
+        }
+        let mut out = vec![];
+        walk(&self.start_items(), &mut out);
+        out
     }
 
     fn open_sys(&mut self, id: u64) {
         let Some(w) = self.wins.iter().find(|w| w.id == id) else { return };
         let (res, dialog) = (w.app.resizable(), w.app.dialog());
+        if self.tiling {
+            let to = (0..tiling::WORKSPACES).map(|n| Item::new(format!("Workspace {}", n + 1), Cmd::Sys(Sys::ToWs(n))).checked(w.ws == n)).collect();
+            let mut items = vec![
+                Item::new("Float", Cmd::Sys(Sys::Float)).checked(w.float).enabled(res && !dialog).key("Alt+T"),
+                Item::new("Fullscreen", Cmd::Sys(Sys::Full)).checked(w.full).enabled(!dialog).key("Alt+F"),
+                Item::sub("Move to", to).enabled(!dialog),
+            ];
+            if w.float {
+                items.push(Item::new("Move", Cmd::Sys(Sys::Move)));
+            }
+            items.extend([Item::sep(), Item::new("Close", Cmd::Sys(Sys::Close)).key("Alt+W")]);
+            let (x, y) = (w.x + 1, w.y + 1);
+            return self.open_menu(Owner::Sys(id), items, x, y, false);
+        }
         let items = vec![
             Item::new("Restore", Cmd::Sys(Sys::Restore)).enabled(w.max),
             Item::new("Move", Cmd::Sys(Sys::Move)).enabled(!w.max),
@@ -691,6 +835,8 @@ impl Desktop {
             Cmd::Desk(s) => match s {
                 "theme" => self.reload_theme(),
                 "lite" => self.set_lite(true),
+                "windows" => self.set_tiling(false, true),
+                "omarchy" => self.set_tiling(true, true),
                 "classic" => self.set_lite(false),
                 "props" => self.launch(Launch::Msg {
                     title: "Display Properties".into(),
@@ -800,14 +946,12 @@ impl Desktop {
             win.sync();
         }
         self.menu = None;
+        self.relayout();
     }
 
     fn cycle(&mut self) {
-        if self.wins.len() > 1 {
-            let id = self.wins[0].id;
-            self.focus_win(id);
-        } else if let Some(w) = self.wins.first() {
-            let id = w.id;
+        // the window furthest back comes to the front
+        if let Some(id) = self.wins.iter().find(|w| !w.hidden && !(self.tiling && w.ws != self.cur_ws)).map(|w| w.id) {
             self.focus_win(id);
         }
     }
@@ -845,6 +989,9 @@ impl Desktop {
             self.menu_key(k);
             return;
         }
+        if self.tiling && self.tiling_key(k) {
+            return;
+        }
         let (alt, ctrl) = (k.modifiers.contains(KeyModifiers::ALT), k.modifiers.contains(KeyModifiers::CONTROL));
         match k.code {
             KeyCode::Esc if ctrl => return self.open_start(),
@@ -876,6 +1023,9 @@ impl Desktop {
             return;
         }
         let n = self.icons.len();
+        if self.tiling {
+            return;
+        }
         match k.code {
             KeyCode::Down | KeyCode::Right | KeyCode::Tab => self.sel_icon = Some(self.sel_icon.map(|i| (i + 1) % n).unwrap_or(0)),
             KeyCode::Up | KeyCode::Left | KeyCode::BackTab => self.sel_icon = Some(self.sel_icon.map(|i| (i + n - 1) % n).unwrap_or(0)),
@@ -909,6 +1059,9 @@ impl Desktop {
     }
 
     fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
+        if self.tiling {
+            return None;
+        }
         (0..self.icons.len()).find(|&i| {
             let (ix, iy) = self.icon_slot(i);
             let (w, h) = if self.lite { (11, 4) } else { (12, 5) };
@@ -954,6 +1107,7 @@ impl Desktop {
             MouseEventKind::Up(b) => self.mouse_up(b, x, y, m.modifiers),
             MouseEventKind::Drag(b) => self.mouse_drag(b, x, y, m.modifiers),
             MouseEventKind::Moved => {
+                self.dock_hover(x, y);
                 self.menu_hover(x, y);
                 if self.menu.is_none() {
                     if let (Some(id), Some(i)) = (self.focus, self.win_at(x, y)) {
@@ -1020,7 +1174,7 @@ impl Desktop {
                 None => {
                     let owner = m.owner;
                     self.menu = None;
-                    if owner == Owner::Start && y == self.h - 1 && x < 10 {
+                    if owner == Owner::Start && (!self.tiling && y == self.h - 1 && x < 10 || self.tiling && y == 0 && x < 3) {
                         return;
                     }
                     if let Owner::Bar(id, _) = owner {
@@ -1036,7 +1190,25 @@ impl Desktop {
         if self.kbmode.is_some() {
             self.kbmode = None;
         }
-        if y == self.h - 1 {
+        if self.tiling {
+            if self.dock_visible() && self.dock_layout().contains(x, y) {
+                return self.dock_click(b, x, y);
+            }
+            if y == 0 && self.full_win().is_none() {
+                if let Some(h) = self.top_hit(x) {
+                    self.top_click(h);
+                }
+                return;
+            }
+            let on_frame = self.win_at(x, y).is_none_or(|i| matches!(self.wins[i].hit(x, y), Some(Part::Frame)));
+            if on_frame && b == MouseButton::Left {
+                if let Some(s) = self.split_at(x, y) {
+                    self.drag = Drag::Split(s);
+                    return;
+                }
+            }
+        }
+        if !self.tiling && y == self.h - 1 {
             match self.taskbar_hit(x) {
                 Some(TaskHit::Start) => {
                     self.open_start();
@@ -1079,6 +1251,8 @@ impl Desktop {
                         }
                     } else if self.double(x, y) {
                         self.toggle_max(id);
+                    } else if self.wins.last().unwrap().tiled {
+                        self.drag = Drag::Swap { id };
                     } else {
                         let w = self.wins.last().unwrap();
                         let pull = (w.max || w.snapped) && w.app.resizable();
@@ -1142,6 +1316,11 @@ impl Desktop {
                 }
             }
             Drag::Client { id } => self.forward(id, MouseEventKind::Up(b), x, y, mods),
+            Drag::Swap { id } => {
+                if let Some(other) = self.swap_target(id, x, y) {
+                    self.swap(id, other);
+                }
+            }
             Drag::Start | Drag::None => {
                 // Press on the Apps button, slide up and release on an item.
                 if let Some((m, opened)) = &self.menu {
@@ -1159,7 +1338,7 @@ impl Desktop {
     }
 
     fn mouse_drag(&mut self, b: MouseButton, x: i32, y: i32, mods: KeyModifiers) {
-        let (sw, sh) = (self.w, self.work_h());
+        let (sw, sh, top) = (self.w, self.work_h(), self.tiling as i32);
         match self.drag {
             Drag::Move { id, mut dx, dy, pull } => {
                 if pull {
@@ -1178,9 +1357,9 @@ impl Desktop {
                 }
                 if let Some(w) = self.win(id) {
                     w.x = (x - dx).clamp(4 - w.w, sw - 4);
-                    w.y = (y - dy).clamp(0, sh - 1);
+                    w.y = (y - dy).clamp(top, sh - 1);
                 }
-                let can = self.wins.iter().find(|w| w.id == id).is_some_and(|w| w.app.resizable());
+                let can = !self.tiling && self.wins.iter().find(|w| w.id == id).is_some_and(|w| w.app.resizable());
                 self.snap = if can { self.snap_at(x, y) } else { None };
             }
             Drag::Resize { id, l, r, b: bot, mx, my, orig: (ox, oy, ow, oh) } => {
@@ -1202,6 +1381,7 @@ impl Desktop {
                 }
             }
             Drag::Client { id } => self.forward(id, MouseEventKind::Drag(b), x, y, mods),
+            Drag::Split(s) => self.drag_split(s, x, y),
             Drag::Start | Drag::None => self.menu_hover(x, y),
             _ => {}
         }
@@ -1248,6 +1428,7 @@ impl Desktop {
         let c = clock();
         if c != self.clock {
             self.clock = c;
+            self.tick_tiling();
             dirty = true;
         }
         if self.theme_check.elapsed().as_millis() > 1000 {
@@ -1267,7 +1448,11 @@ impl Desktop {
         let mut c = Canvas::new(f.buffer_mut());
         c.fill(0, 0, self.w, self.h, st(th.text, th.desk));
         let pal = palette(&th);
-        for (i, ic) in self.icons.iter().enumerate() {
+        if self.tiling && !self.wins.iter().any(|w| !w.hidden && !w.min) {
+            self.render_empty_hint(&mut c, &th);
+        }
+        let icons = if self.tiling { &[][..] } else { &self.icons[..] };
+        for (i, ic) in icons.iter().enumerate() {
             let (x, y) = self.icon_slot(i);
             if th.lite {
                 let on = self.sel_icon == Some(i);
@@ -1304,19 +1489,33 @@ impl Desktop {
             },
             None => None,
         };
-        for w in &mut self.wins {
-            if w.min {
-                continue;
-            }
-            let focused = self.focus == Some(w.id);
-            draw_window(&mut c, &th, w, focused, pressed.filter(|p| p.0 == w.id).map(|p| p.1), open_bar.filter(|b| b.0 == w.id).map(|b| b.1));
+        // tiles first, floating windows over them
+        let mut zs: Vec<usize> = (0..self.wins.len()).filter(|&i| !self.wins[i].min && !self.wins[i].hidden).collect();
+        zs.sort_by_key(|&i| !self.wins[i].tiled);
+        let swap_to = match self.drag {
+            Drag::Swap { id } => self.hover.and_then(|(x, y)| self.swap_target(id, x, y)),
+            _ => None,
+        };
+        for i in zs {
+            let w = &mut self.wins[i];
+            let focused = self.focus == Some(w.id) || swap_to == Some(w.id);
+            draw_window(&mut c, &th, w, self.tiling, focused, pressed.filter(|p| p.0 == w.id).map(|p| p.1), open_bar.filter(|b| b.0 == w.id).map(|b| b.1));
         }
         // Where the window will land if it is let go here.
         if let (Some(s), Drag::Move { .. }) = (self.snap, &self.drag) {
             let (x, y, w, h) = self.snap_rect(s);
             c.frame(x, y, w, h, Style::new().fg(th.accent));
         }
-        self.render_taskbar(&mut c, &th);
+        if !self.tiling {
+            self.render_taskbar(&mut c, &th);
+        } else {
+            if self.full_win().is_none() {
+                self.render_top(&mut c, &th);
+            }
+            if self.dock_visible() {
+                self.render_dock(&mut c, &th);
+            }
+        }
         if let Some((m, _)) = &self.menu {
             m.render(&mut c, &th);
         }
@@ -1332,7 +1531,8 @@ impl Desktop {
                 if let Some((cx, cy)) = w.app.cursor() {
                     let (ox, oy, cw, ch) = w.client();
                     let (x, y) = (ox + cx as i32, oy + cy as i32);
-                    if (cx as i32) < cw && (cy as i32) < ch && x >= 0 && y >= 0 && x < self.w && y < self.h - 1 {
+                    let bottom = if !self.tiling { self.h - 1 } else if self.dock_visible() { self.dock_layout().y - 1 } else { self.h };
+                    if (cx as i32) < cw && (cy as i32) < ch && x >= 0 && y >= 0 && x < self.w && y < bottom {
                         f.set_cursor_position(Position::new(x as u16, y as u16));
                     }
                 }
@@ -1415,7 +1615,7 @@ fn wrap_label(label: &str) -> Vec<String> {
     lines
 }
 
-fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, focused: bool, pressed: Option<Part>, open_bar: Option<usize>) {
+fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, tiling: bool, focused: bool, pressed: Option<Part>, open_bar: Option<usize>) {
     let (cx, cy, _, _) = w.client();
     w.buf.reset();
     {
@@ -1423,7 +1623,8 @@ fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, focused: bool, pressed: 
         w.app.render(&mut wc, th, focused);
     }
     c.blit(&w.buf, cx, cy);
-    if th.lite {
+    // the Omarchy desktop always has line borders, whatever the look
+    if th.lite || tiling {
         return draw_frame_lite(c, th, w, focused, pressed, open_bar);
     }
     let (x, y, ww, hh) = (w.x, w.y, w.w, w.h);
@@ -1477,11 +1678,11 @@ fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, focused: bool, pressed: 
 
 fn draw_frame_lite(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed: Option<Part>, open_bar: Option<usize>) {
     let (x, y, ww, hh) = (w.x, w.y, w.w, w.h);
-    let line = Style::new().fg(if focused { th.accent } else { th.dim });
+    let line = st(if focused { th.accent } else { th.dim }, th.desk);
     c.frame(x, y, ww, hh, line);
-    let ts = if focused { Style::new().fg(th.accent).add_modifier(Modifier::BOLD) } else { Style::new().fg(th.dim) };
+    let ts = if focused { st(th.accent, th.desk).add_modifier(Modifier::BOLD) } else { st(th.dim, th.desk) };
     let r = w.buttons_x();
-    let dialog = w.app.dialog();
+    let dialog = w.app.dialog() || w.tiled;
     let title_end = if dialog { r - 3 } else if w.app.resizable() { r - 10 } else { r - 7 };
     let (g, _) = w.app.icon().glyph(th);
     c.put(x + 1, y, " ", ts);
@@ -1505,12 +1706,12 @@ fn draw_frame_lite(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed: 
     }
     if w.has_bar {
         let menus = w.app.menubar();
-        c.fill(x + 1, y + 1, ww - 2, 1, Style::new());
+        c.fill(x + 1, y + 1, ww - 2, 1, Style::new().bg(th.client));
         for (i, ((bx, bw), (label, _))) in bar_layout(&menus).into_iter().zip(menus.iter()).enumerate() {
             if x + 1 + bx + bw > x + ww - 1 {
                 break;
             }
-            let s = if open_bar == Some(i) { th.sel() } else { Style::new().fg(th.text) };
+            let s = if open_bar == Some(i) { th.sel() } else { st(th.text, th.client) };
             c.fill(x + 1 + bx, y + 1, bw, 1, s);
             let mut chars = label.chars();
             if let Some(first) = chars.next() {
@@ -1573,6 +1774,39 @@ mod tests {
         let n = r(&d);
         assert!(!d.wins.last().unwrap().max && !d.wins.last().unwrap().snapped);
         assert_eq!((n.2, n.3), (w, h));
+    }
+
+    #[test]
+    fn tiling_splits_the_screen_and_keeps_workspaces_apart() {
+        let mut d = Desktop::new(120, 40, true);
+        d.set_tiling(true, false);
+        d.launch(Launch::Notepad(None));
+        // one window fills everything under the bar
+        assert_eq!(r(&d), (1, 1, 118, 39));
+        d.launch(Launch::Notepad(None));
+        d.launch(Launch::Notepad(None));
+        // dwindle: left half, then the right half split top and bottom
+        let rects: Vec<_> = d.order.iter().map(|id| d.wins.iter().find(|w| w.id == *id).map(|w| (w.x, w.y, w.w, w.h)).unwrap()).collect();
+        assert_eq!(rects, vec![(1, 1, 59, 39), (61, 1, 58, 20), (61, 21, 58, 19)]);
+        // send the focused one to workspace 2: the other two share the screen
+        let id = d.focus.unwrap();
+        d.key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::ALT | KeyModifiers::SHIFT));
+        assert!(d.wins.iter().find(|w| w.id == id).unwrap().hidden);
+        assert_eq!(d.wins.iter().filter(|w| !w.hidden).count(), 2);
+        assert!(d.wins.iter().filter(|w| !w.hidden).all(|w| w.w == 58 || w.w == 59));
+        // and Alt+2 shows it alone
+        d.key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
+        assert_eq!(d.cur_ws, 1);
+        assert_eq!(d.focus, Some(id));
+        assert_eq!(r(&d), (1, 1, 118, 39));
+        // fullscreen covers the bar too; dialogs float over the tiles
+        d.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(r(&d), (0, 0, 120, 40));
+        d.launch(Launch::Run);
+        assert!(d.wins.last().unwrap().float && !d.wins.last().unwrap().tiled);
+        // back to overlapping windows, nothing hidden or tiled
+        d.set_tiling(false, false);
+        assert!(d.wins.iter().all(|w| !w.hidden && !w.tiled));
     }
 
     #[test]

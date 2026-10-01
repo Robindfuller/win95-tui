@@ -31,7 +31,15 @@ fn main() -> anyhow::Result<()> {
     } else {
         theme::saved_lite()
     };
+    let tiling = if args.iter().any(|a| a == "--windows") {
+        false
+    } else if args.iter().any(|a| a == "--omarchy") {
+        true
+    } else {
+        theme::saved_tiling()
+    };
     let mut desk = wm::Desktop::new(size.width, size.height, lite);
+    desk.set_tiling(tiling, false);
     let res = run(&mut terminal, &mut desk);
     if kb {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);

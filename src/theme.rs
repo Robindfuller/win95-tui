@@ -44,15 +44,41 @@ fn settings_path() -> PathBuf {
     home().join(".config/win95-tui/settings")
 }
 
+/// A saved setting from ~/.config/win95-tui/settings ("key=value" lines).
+fn setting(key: &str) -> Option<String> {
+    let txt = fs::read_to_string(settings_path()).ok()?;
+    txt.lines().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim().to_string())
+}
+
+fn save_setting(key: &str, val: &str) {
+    let p = settings_path();
+    let _ = fs::create_dir_all(p.parent().unwrap());
+    let mut lines: Vec<String> = fs::read_to_string(&p)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != key))
+        .map(String::from)
+        .collect();
+    lines.push(format!("{key}={val}"));
+    let _ = fs::write(p, lines.join("\n") + "\n");
+}
+
 /// The saved look; Lite unless the user picked Classic.
 pub fn saved_lite() -> bool {
-    !fs::read_to_string(settings_path()).is_ok_and(|s| s.lines().any(|l| l.trim() == "style=classic"))
+    setting("style").as_deref() != Some("classic")
 }
 
 pub fn save_lite(lite: bool) {
-    let p = settings_path();
-    let _ = fs::create_dir_all(p.parent().unwrap());
-    let _ = fs::write(p, format!("style={}\n", if lite { "lite" } else { "classic" }));
+    save_setting("style", if lite { "lite" } else { "classic" });
+}
+
+/// The saved desktop: the tiling Omarchy one, or overlapping Windows ones.
+pub fn saved_tiling() -> bool {
+    setting("desktop").as_deref() == Some("omarchy")
+}
+
+pub fn save_tiling(tiling: bool) {
+    save_setting("desktop", if tiling { "omarchy" } else { "windows" });
 }
 
 pub fn colors_path() -> PathBuf {

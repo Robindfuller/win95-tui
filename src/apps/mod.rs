@@ -1,5 +1,6 @@
 pub mod dialogs;
 pub mod explorer;
+pub mod launcher;
 pub mod mines;
 pub mod notepad;
 pub mod term;
@@ -19,6 +20,8 @@ pub enum Launch {
     About,
     ShutDown,
     TaskList,
+    /// the tiling desktop's app launcher
+    Launcher,
     Msg { title: String, text: String },
 }
 

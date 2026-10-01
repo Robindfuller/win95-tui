@@ -30,6 +30,30 @@ Alt+L switches between the Lite look (default) and a chunkier Classic look with
 filled windows. Also under Apps > Settings, and `--lite` / `--classic` on the
 command line. The choice is saved in ~/.config/win95-tui/settings.
 
+## Omarchy desktop
+
+Apps > Settings > Omarchy Desktop swaps the overlapping windows for a tiling
+desktop like Omarchy's own: a bar along the top (Apps menu, workspaces,
+clock, battery, power), windows tiled Hyprland's dwindle way, and a dock that
+slides up when the pointer reaches the bottom edge (it stays up on an empty
+workspace). Dialogs and fixed-size apps like Mines float over the tiles.
+
+Keys use Alt, or Super where your terminal passes it on (Hyprland keeps its
+own Super bindings for itself):
+
+    Alt+Enter      Terminal             Alt+W          Close window
+    Alt+Space      Launcher             Alt+F          Fullscreen
+    Alt+1..9       Go to workspace      Alt+T          Float or tile
+    Alt+Shift+1..9 Send window there    Alt+Arrows     Focus (Shift swaps)
+
+With the mouse: drag the line between two tiles to resize them, drag a
+title onto another window to swap them, double-click a title for
+fullscreen. In the dock, click an app to start it or bring its window up
+(again for its next one), right-click for a new one. Dots show what's open.
+
+`--omarchy` / `--windows` pick one for a single run; the menu choice is saved
+in ~/.config/win95-tui/settings alongside the look.
+
 It's a plain terminal program, so it works the same over SSH.
 
     cargo build --release && cp target/release/win95 ~/.local/bin/
