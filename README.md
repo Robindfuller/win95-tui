@@ -51,9 +51,11 @@ doesn't work over SSH.
   left click fires, Space or right click opens doors, Shift runs, Esc is the
   menu. Keys work best in a terminal with the kitty keyboard protocol (Ghostty,
   Kitty, Alacritty, foot), which tells it when a key is let go.
-- **Media Player**: laid out like the Windows 95 one, with the track bar,
-  its scale and the transport buttons. A mockup for now: it plays drawn
-  clouds rather than a file. Space plays and pauses, arrows step.
+- **Media Player**: plays video (MPG, MP4, MKV, AVI and the rest) in chunky
+  half-block pixels, laid out like the Windows 95 one with the track bar, its
+  scale and the transport buttons. ffmpeg draws the picture and mpv plays the
+  sound. Open a video from Files, or File > Open... in the player. Space plays
+  and pauses, S stops, arrows step 5 seconds, I and O mark a selection.
 - **Run...** opens any command in its own window.
 
 Add your own with Apps > Add Program...: type the command that starts it and

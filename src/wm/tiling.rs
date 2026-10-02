@@ -72,7 +72,7 @@ pub fn launch_key(l: &Launch) -> Option<String> {
         Launch::Doom => "Doom".into(),
         Launch::Browser(_) => "Browser".into(),
         Launch::Paint(_) => "Paint".into(),
-        Launch::MediaPlayer => "Media Player".into(),
+        Launch::MediaPlayer(_) => "Media Player".into(),
         _ => return None,
     })
 }

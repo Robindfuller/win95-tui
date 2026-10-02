@@ -26,8 +26,8 @@ pub enum Launch {
     Amp(Vec<PathBuf>),
     Solitaire,
     Doom,
-    /// the video player (a mockup for now)
-    MediaPlayer,
+    /// the video player, with a file to play
+    MediaPlayer(Option<PathBuf>),
     /// the web browser, at this address or its home page
     Browser(Option<String>),
     Paint(Option<PathBuf>),

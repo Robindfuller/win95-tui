@@ -368,7 +368,7 @@ impl Desktop {
             d(Icon::Doom, "Doom", Launch::Doom),
             d(Icon::Browser, "Browser", Launch::Browser(None)),
             d(Icon::Paint, "Paint", Launch::Paint(None)),
-            d(Icon::MediaPlayer, "Media Player", Launch::MediaPlayer),
+            d(Icon::MediaPlayer, "Media Player", Launch::MediaPlayer(None)),
         ];
         if has("btop") {
             v.push(d(Icon::Monitor, "Monitor", Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
@@ -665,7 +665,7 @@ impl Desktop {
             Launch::Amp(files) => Box::new(Amp::new(files)),
             Launch::Solitaire => Box::new(Solitaire::new()),
             Launch::Doom => Box::new(crate::apps::doom::Doom::new()),
-            Launch::MediaPlayer => Box::new(crate::apps::mplayer::MediaPlayer::new()),
+            Launch::MediaPlayer(f) => Box::new(crate::apps::mplayer::MediaPlayer::new(f)),
             Launch::Browser(u) => Box::new(Tabs::new(Box::new(Browser::new(u)), &self.th)),
             Launch::Paint(p) => Box::new(Paint::new(p)),
             Launch::External(p) => {
@@ -818,7 +818,7 @@ impl Desktop {
             Item::new("Doom", Cmd::Launch(Launch::Doom)).icon(Icon::Doom),
             Item::new("Browser", Cmd::Launch(Launch::Browser(None))).icon(Icon::Browser),
             Item::new("Paint", Cmd::Launch(Launch::Paint(None))).icon(Icon::Paint),
-            Item::new("Media Player", Cmd::Launch(Launch::MediaPlayer)).icon(Icon::MediaPlayer),
+            Item::new("Media Player", Cmd::Launch(Launch::MediaPlayer(None))).icon(Icon::MediaPlayer),
         ];
         if has("btop") {
             progs.push(Item::new("Monitor", shell("Monitor", Icon::Monitor, Some("btop"))).icon(Icon::Monitor));

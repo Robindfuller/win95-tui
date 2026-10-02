@@ -1,5 +1,6 @@
-// What opens what: folders in Files, bitmaps in Paint, music in Amp, text in Notes, and
-// anything else with whatever the system uses for it.
+// What opens what: folders in Files, bitmaps in Paint, video in Media Player,
+// music in Amp, text in Notes, and anything else with whatever the system uses
+// for it.
 use crate::{apps::Launch, icons::Icon};
 use std::{fs, io::Read, path::Path};
 
@@ -25,6 +26,8 @@ pub fn launch(p: &Path) -> Launch {
         Launch::Explorer(p.to_path_buf())
     } else if is_bitmap(p) {
         Launch::Paint(Some(p.to_path_buf()))
+    } else if crate::apps::mplayer::plays(p) {
+        Launch::MediaPlayer(Some(p.to_path_buf()))
     } else if crate::apps::amp::plays(p) {
         Launch::Amp(vec![p.to_path_buf()])
     } else if looks_text(p) {
@@ -39,6 +42,8 @@ pub fn icon(p: &Path) -> Icon {
         Icon::Folder
     } else if is_bitmap(p) {
         Icon::Picture
+    } else if crate::apps::mplayer::plays(p) {
+        Icon::MediaPlayer
     } else if crate::apps::amp::plays(p) {
         Icon::Amp
     } else if looks_text(p) {
