@@ -82,7 +82,8 @@ shows where it will land. Drag it off again and it goes back to its own size.
 
 Keys: Ctrl+Esc or Alt+S for the Apps menu, Alt+Tab or Alt+` to switch, Alt+F4 to
 close, Alt+Space for the window menu, Ctrl+Alt+Del for the task list,
-Shift+PgUp/PgDn to scroll back in a terminal.
+Shift+PgUp/PgDn to scroll back in a terminal. With the Apps menu open, just
+start typing to search it; Enter opens the top match, Esc clears the search.
 
 ## Sessions
 

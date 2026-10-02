@@ -38,11 +38,16 @@ pub struct Item {
     pub key: &'static str,
     pub enabled: bool,
     pub checked: bool,
+    /// a line of text that can't be picked, like the search box
+    pub heading: bool,
 }
 
 impl Item {
     pub fn new(label: impl Into<String>, cmd: Cmd) -> Item {
-        Item { label: label.into(), icon: None, cmd, sub: vec![], sep: false, key: "", enabled: true, checked: false }
+        Item { label: label.into(), icon: None, cmd, sub: vec![], sep: false, key: "", enabled: true, checked: false, heading: false }
+    }
+    pub fn heading(label: impl Into<String>) -> Item {
+        Item { heading: true, ..Item::new(label, Cmd::None) }
     }
     pub fn sep() -> Item {
         Item { sep: true, ..Item::new("", Cmd::None) }
@@ -67,7 +72,7 @@ impl Item {
         self
     }
     fn selectable(&self) -> bool {
-        !self.sep && self.enabled
+        !self.sep && self.enabled && !self.heading
     }
 }
 
@@ -146,6 +151,14 @@ impl Level {
             }
             let on = self.sel == Some(i);
             let (fg, bg) = if on { (th.on_accent, th.accent) } else if it.enabled { (th.text, th.face) } else { (th.dim, th.face) };
+            if it.heading {
+                c.fill(ix, y, iw, 1, st(th.text, th.client));
+                if let Some(icon) = it.icon {
+                    c.put_c(ix + 1, y, icon.glyph(th).0, st(th.accent, th.client));
+                }
+                c.text(ix + 3, y, &it.label, st(th.text, th.client).add_modifier(ratatui::style::Modifier::BOLD));
+                continue;
+            }
             c.fill(ix, y, iw, 1, st(fg, bg));
             if it.checked {
                 c.put(ix + 1, y, "✓", st(fg, bg));
@@ -167,6 +180,8 @@ impl Level {
 pub struct MenuState {
     pub owner: Owner,
     pub levels: Vec<Level>,
+    /// typed into the Apps menu to search it
+    pub query: String,
 }
 
 impl MenuState {

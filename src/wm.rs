@@ -5,9 +5,9 @@ mod tray;
 use crate::{
     apps::{
         background::Background,
-        dialogs::{about_text, AddProgram, MsgBox, Run, ShutDown, TaskList},
+        dialogs::{about_text, parse_run, AddProgram, MsgBox, Run, ShutDown, TaskList},
         explorer::Explorer,
-        launcher::Launcher,
+        launcher::{rank, Launcher},
         amp::Amp,
         mines::Mines,
         solitaire::Solitaire,
@@ -889,7 +889,7 @@ impl Desktop {
         if l.y + l.height() > self.work_h() {
             l.y = (self.work_h() - l.height()).max(0);
         }
-        self.menu = Some((MenuState { owner, levels: vec![l] }, Instant::now()));
+        self.menu = Some((MenuState { owner, levels: vec![l], query: String::new() }, Instant::now()));
     }
 
     fn open_start(&mut self) {
@@ -897,6 +897,45 @@ impl Desktop {
         let h = items.len() as i32 + 2;
         let y = if self.tiling { 1 } else { self.work_h() - h };
         self.open_menu(Owner::Start, items, 0, y, false);
+    }
+
+    /// Shows what matches the search typed into the Apps menu, in place of
+    /// the menu, or the menu again once the search is cleared.
+    fn search_start(&mut self) {
+        let Some((m, _)) = &self.menu else { return };
+        let q = m.query.trim().to_string();
+        let all = self.start_items();
+        let items = if q.is_empty() {
+            all
+        } else {
+            fn leaves(items: &[Item], out: &mut Vec<Item>) {
+                for it in items {
+                    if !it.sub.is_empty() {
+                        leaves(&it.sub, out);
+                    } else if it.enabled && !it.sep && !matches!(it.cmd, Cmd::None) && !out.iter().any(|o| o.label == it.label) {
+                        out.push(it.clone());
+                    }
+                }
+            }
+            let mut found = vec![];
+            leaves(&all, &mut found);
+            let hits = rank(found.iter().map(|it| it.label.trim_end_matches("...")), &q);
+            let mut v = vec![Item::heading(format!("{}▏", m.query)).icon(Icon::Run), Item::sep()];
+            if hits.is_empty() {
+                // nothing by that name: run it as a command, like Run... does
+                v.push(Item::new(format!("Run {q}"), Cmd::Launch(parse_run(&q))).icon(Icon::Run));
+            }
+            v.extend(hits.into_iter().take(14).map(|i| found[i].clone()));
+            v
+        };
+        let y = if self.tiling { 1 } else { self.work_h() - items.len() as i32 - 2 };
+        let Some((m, _)) = &mut self.menu else { return };
+        m.levels.truncate(1);
+        let l = &mut m.levels[0];
+        (l.items, l.y, l.sel) = (items, y.max(0), None);
+        if !q.is_empty() {
+            l.step(1);
+        }
     }
 
     /// Everything on the Apps menu that starts something, for the launcher.
@@ -1079,6 +1118,24 @@ impl Desktop {
     fn menu_key(&mut self, k: KeyEvent) {
         let (w, h) = (self.w, self.h - 1);
         let Some((m, _)) = &mut self.menu else { return };
+        // typing into the Apps menu searches it
+        if m.owner == Owner::Start && !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            match k.code {
+                KeyCode::Char(c) if c != ' ' || !m.query.is_empty() => {
+                    m.query.push(c);
+                    return self.search_start();
+                }
+                KeyCode::Backspace | KeyCode::Esc if !m.query.is_empty() => {
+                    if k.code == KeyCode::Esc {
+                        m.query.clear();
+                    } else {
+                        m.query.pop();
+                    }
+                    return self.search_start();
+                }
+                _ => {}
+            }
+        }
         let lvl = m.levels.len() - 1;
         let sel = m.levels[lvl].sel;
         match k.code {
@@ -2141,6 +2198,29 @@ mod tests {
     fn r(d: &Desktop) -> (i32, i32, i32, i32) {
         let w = d.wins.last().unwrap();
         (w.x, w.y, w.w, w.h)
+    }
+
+    #[test]
+    fn typing_in_the_apps_menu_searches_it() {
+        let mut d = Desktop::new(120, 40);
+        let key = |d: &mut Desktop, c: KeyCode| d.key(KeyEvent::new(c, KeyModifiers::NONE));
+        d.open_start();
+        for c in "soli".chars() {
+            key(&mut d, KeyCode::Char(c));
+        }
+        let shown = |d: &Desktop| d.menu.as_ref().unwrap().0.levels[0].items.iter().map(|i| i.label.clone()).collect::<Vec<_>>();
+        assert_eq!(shown(&d)[2], "Solitaire");
+        // Esc clears the search and brings the menu back, a second Esc closes it
+        key(&mut d, KeyCode::Esc);
+        assert!(shown(&d).iter().any(|l| l == "Programs"));
+        key(&mut d, KeyCode::Esc);
+        assert!(d.menu.is_none());
+        d.open_start();
+        for c in "soli".chars() {
+            key(&mut d, KeyCode::Char(c));
+        }
+        key(&mut d, KeyCode::Enter);
+        assert_eq!(d.wins.last().unwrap().app.title(), "Solitaire");
     }
 
     #[test]

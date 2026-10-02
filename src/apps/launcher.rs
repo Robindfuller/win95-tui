@@ -15,6 +15,29 @@ pub struct Launcher {
 
 const ROWS: usize = 12;
 
+/// Indexes of the names that match a search, best first: names that start
+/// with it, then ones that contain it, then ones that have its letters in order.
+pub fn rank<'a>(names: impl Iterator<Item = &'a str>, query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    let mut scored: Vec<(u8, usize)> = names
+        .enumerate()
+        .filter_map(|(i, name)| {
+            let n = name.to_lowercase();
+            let score = if q.is_empty() || n.starts_with(&q) {
+                0
+            } else if n.contains(&q) {
+                1
+            } else {
+                let mut it = n.chars();
+                if q.chars().all(|c| it.any(|x| x == c)) { 2 } else { return None }
+            };
+            Some((score, i))
+        })
+        .collect();
+    scored.sort();
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
 impl Launcher {
     pub fn new(items: Vec<(String, Icon, Launch)>) -> Launcher {
         Launcher { items, query: String::new(), sel: 0, top: 0 }
@@ -24,29 +47,7 @@ impl Launcher {
     /// what you typed, then ones that contain it, then ones that have its
     /// letters in order.
     fn matches(&self) -> Vec<usize> {
-        let q = self.query.trim().to_lowercase();
-        if q.is_empty() {
-            return (0..self.items.len()).collect();
-        }
-        let mut scored: Vec<(u8, usize)> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (name, _, _))| {
-                let n = name.to_lowercase();
-                let score = if n.starts_with(&q) {
-                    0
-                } else if n.contains(&q) {
-                    1
-                } else {
-                    let mut it = n.chars();
-                    if q.chars().all(|c| it.any(|x| x == c)) { 2 } else { return None }
-                };
-                Some((score, i))
-            })
-            .collect();
-        scored.sort();
-        scored.into_iter().map(|(_, i)| i).collect()
+        rank(self.items.iter().map(|(n, _, _)| n.as_str()), &self.query)
     }
 
     fn go(&self) -> Action {
