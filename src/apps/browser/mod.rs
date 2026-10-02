@@ -2,6 +2,7 @@
 // site's own colour for its name, headings and rules, its logo and pictures in
 // chunky pixels, and links you click. No JavaScript, so it suits reading:
 // articles, wikis, forums, search results.
+mod ai;
 mod chrome;
 mod fetch;
 mod page;
@@ -14,6 +15,7 @@ use crate::{
     theme::{contrast, mix, Rgb, Theme},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use ai::Summary;
 use fetch::{Msg, Req};
 use image::{imageops::FilterType, RgbaImage};
 use page::{Block, Page, Span};
@@ -71,6 +73,8 @@ enum Hit {
 
 /// One page in the history, with the pictures that have come in for it.
 struct Doc {
+    /// tells AI answers which page they belong to
+    id: u64,
     page: Page,
     logo: Option<RgbaImage>,
     imgs: Vec<Option<RgbaImage>>,
@@ -81,13 +85,14 @@ struct Doc {
     /// the logo's own colour, when the page doesn't name one
     logo_brand: Option<Rgb>,
     scaled: HashMap<(Pic, u16), RgbaImage>,
+    summary: Option<Summary>,
 }
 
 impl Doc {
-    fn new(page: Page) -> Doc {
+    fn new(id: u64, page: Page) -> Doc {
         let values = page.forms.iter().map(|f| f.value.clone()).collect();
         let imgs = vec![None; page.imgs.len()];
-        Doc { page, logo: None, imgs, done: false, scroll: 0, values, logo_brand: None, scaled: HashMap::new() }
+        Doc { id, page, logo: None, imgs, done: false, scroll: 0, values, logo_brand: None, scaled: HashMap::new(), summary: None }
     }
 
     fn pic(&self, p: Pic) -> Option<&RgbaImage> {
@@ -120,6 +125,7 @@ pub struct Browser {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     ticket: u64,
+    next_doc: u64,
     loading: Option<(String, Nav)>,
     hist: Vec<Doc>,
     pos: usize,
@@ -268,6 +274,7 @@ impl Browser {
             tx,
             rx,
             ticket: 0,
+            next_doc: 0,
             loading: None,
             hist: vec![],
             pos: 0,
@@ -371,6 +378,22 @@ impl Browser {
         self.sel = None;
         self.hover = None;
         self.laid = None;
+        self.summarise();
+    }
+
+    /// In AI mode, asks Claude about the page on show if nobody has yet.
+    fn summarise(&mut self) {
+        if !self.ai {
+            return;
+        }
+        let tx = self.tx.clone();
+        let Some(d) = self.doc_mut() else { return };
+        if d.summary.is_some() || !ai::worth(&d.page) {
+            return;
+        }
+        d.summary = Some(Summary::Asking);
+        ai::ask(d.id, ai::text(&d.page), tx);
+        self.laid = None;
     }
 
     fn refresh(&mut self) {
@@ -417,6 +440,30 @@ impl Browser {
         let cw = (pw - 4).clamp(10, MAX_W);
         let x0 = (pw - cw) / 2;
         let mut l = Lay { lines: vec![], x0, cw, gap: true };
+
+        if let Some(s) = d.summary.as_ref().filter(|_| self.ai) {
+            l.blank();
+            l.spans(&[("✦ AI summary".into(), K::Bold, None)], 0, 0);
+            let said = match s {
+                Summary::Asking => vec![("Reading the page…".to_string(), K::Dim)],
+                Summary::Done(v) => v.iter().map(|t| (t.clone(), K::Text)).collect(),
+                Summary::Failed(why) => vec![(format!("Couldn't summarise: {why}"), K::Dim)],
+            };
+            for (t, k) in said {
+                let (bullet, rest) = match t.strip_prefix('•') {
+                    Some(r) => ("• ", r.trim_start().to_string()),
+                    None => ("", t),
+                };
+                let mut v = vec![("│ ".to_string(), K::Dim, None)];
+                if !bullet.is_empty() {
+                    v.push((bullet.into(), K::Dim, None));
+                }
+                v.push((rest, k, None));
+                l.spans(&v, 0, 2 + bullet.chars().count() as i32);
+            }
+            l.rule("─", K::Dim);
+            l.gap = false;
+        }
 
         // the site's own banner
         let banner = d.logo.is_some() || !d.page.nav.is_empty();
@@ -875,7 +922,8 @@ impl App for Browser {
                 Msg::Page(g, page) if g == self.ticket => {
                     let into = self.loading.take().map_or(Nav::Push, |l| l.1);
                     self.addr = page.url.to_string();
-                    let doc = Doc::new(*page);
+                    self.next_doc += 1;
+                    let doc = Doc::new(self.next_doc, *page);
                     if into == Nav::Replace && !self.hist.is_empty() {
                         self.hist[self.pos] = doc;
                     } else {
@@ -892,6 +940,7 @@ impl App for Browser {
                             self.focus = Focus::Form(0);
                         }
                     }
+                    self.summarise();
                 }
                 Msg::Logo(g, img) if g == self.ticket => {
                     if let Some(d) = self.doc_mut() {
@@ -905,6 +954,11 @@ impl App for Browser {
                     if let Some(slot) = self.doc_mut().and_then(|d| d.imgs.get_mut(i)) {
                         *slot = Some(img);
                     }
+                }
+                Msg::Summary(id, s) => {
+                    let Some(d) = self.hist.iter_mut().find(|d| d.id == id) else { continue };
+                    d.summary = Some(s);
+                    self.laid = None;
                 }
                 Msg::Done(g) if g == self.ticket => {
                     if let Some(d) = self.doc_mut() {
@@ -1251,11 +1305,13 @@ impl App for Browser {
             }
             "ai" => {
                 self.ai = !self.ai;
+                self.laid = None;
+                self.summarise();
             }
             "help" => {
                 return Action::Launch(Launch::Msg {
                     title: "Browser keys".into(),
-                    text: "Ctrl+L  type an address or a search\nTab     next link, Enter opens it\nAlt+◂ ▸ back and forward (or Backspace)\nF5      refresh, Esc stops\nSpace   page down\n\nMiddle-click a link for a new tab.\nAI-assisted mode isn't built yet.".into(),
+                    text: "Ctrl+L  type an address or a search\nTab     next link, Enter opens it\nAlt+◂ ▸ back and forward (or Backspace)\nF5      refresh, Esc stops\nSpace   page down\n\nMiddle-click a link for a new tab.\nAI-assisted mode puts a short summary\nfrom Claude at the top of each page.".into(),
                 });
             }
             _ => {}
@@ -1268,15 +1324,18 @@ impl App for Browser {
 mod tests {
     use super::*;
 
-    /// Draws a live page as text: BROWSE=<url> cargo test dump -- --ignored --nocapture
+    /// Draws a live page as text: [AI=1] BROWSE=<url> cargo test dump -- --ignored --nocapture
     #[test]
     #[ignore]
     fn dump() {
         let url = std::env::var("BROWSE").unwrap_or(HOME.into());
         let mut b = Browser::new(Some(url));
+        // AI=1 turns on AI-assisted mode and waits for the summary too
+        b.ai = std::env::var("AI").is_ok();
         b.resize(100, 60);
         let t = std::time::Instant::now();
-        while t.elapsed().as_secs() < 25 && !b.doc().is_some_and(|d| d.done) {
+        let waiting = |b: &Browser| !b.doc().is_some_and(|d| d.done && !matches!(d.summary, Some(Summary::Asking)));
+        while t.elapsed().as_secs() < 45 && waiting(&b) {
             b.poll();
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

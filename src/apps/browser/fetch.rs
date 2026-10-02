@@ -33,6 +33,8 @@ pub enum Msg {
     Logo(u64, RgbaImage),
     Img(u64, usize, RgbaImage),
     Done(u64),
+    /// an AI summary, for the page with this id
+    Summary(u64, super::ai::Summary),
 }
 
 /// Loads a page, sends it, then its logo and pictures one by one.
