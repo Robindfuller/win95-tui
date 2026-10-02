@@ -25,11 +25,15 @@ fn save(list: &[(String, String)]) {
     let _ = fs::write(path(), body);
 }
 
-/// What a command is called on the menu: its program, "elinks" for
-/// "elinks https://...", "btop" for "/usr/bin/btop".
+/// What a command is called on the menu: its program with a capital and
+/// any "-tui" dropped, "Elinks" for "elinks https://...", "Scribe" for
+/// "/usr/bin/scribe-tui".
 pub fn name_of(cmd: &str) -> String {
     let prog = cmd.split_whitespace().next().unwrap_or("");
-    prog.rsplit('/').next().unwrap_or(prog).to_string()
+    let prog = prog.rsplit('/').next().unwrap_or(prog);
+    let prog = prog.strip_suffix("-tui").filter(|p| !p.is_empty()).unwrap_or(prog);
+    let mut c = prog.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 fn icon_path(name: &str) -> PathBuf {

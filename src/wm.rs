@@ -340,7 +340,7 @@ impl Desktop {
                 })
                 .collect(),
             None => {
-                let v = all.into_iter().filter(|(_, l, _)| l != "Files" && l != "Vim");
+                let v = all.into_iter().filter(|(_, l, _)| l != "Files");
                 v.enumerate().map(|(i, e)| {
                     let (x, y) = self.icon_slot(i);
                     make(e, x, y)
@@ -367,9 +367,6 @@ impl Desktop {
         ];
         if has("btop") {
             v.push(d(Icon::Monitor, "Monitor", Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
-        }
-        if has("nvim") {
-            v.push(d(Icon::Vim, "Vim", Launch::shell("Vim", Icon::Vim, Some("nvim"))));
         }
         v.push(d(Icon::Folder, "Files", Launch::Explorer(home())));
         for (name, cmd, icon) in &self.mine {
@@ -818,14 +815,12 @@ impl Desktop {
             progs.push(Item::new("Monitor", shell("Monitor", Icon::Monitor, Some("btop"))).icon(Icon::Monitor));
         }
         progs.push(Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal));
-        if has("nvim") {
-            progs.push(Item::new("Vim", shell("Vim", Icon::Vim, Some("nvim"))).icon(Icon::Vim));
-        }
         progs.push(Item::new("Files", Cmd::Launch(Launch::Explorer(home()))).icon(Icon::Folder));
         // the programs you added go in with the rest
         for (name, cmd, icon) in &self.mine {
             progs.push(Item::new(name.clone(), shell(name, *icon, Some(cmd))).icon(*icon));
         }
+        progs.sort_by_key(|it| it.label.to_lowercase());
         progs.push(Item::sep());
         progs.push(Item::new("Add Program...", Cmd::Launch(Launch::AddProgram)).icon(Icon::Programs));
         if !self.mine.is_empty() {
@@ -2351,15 +2346,15 @@ mod tests {
         m(&mut d, MouseEventKind::Up(l), cx + 12, cy + 8);
         d.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(d.idx(id).is_none(), "the dialog closed");
-        assert_eq!(crate::programs::load(), vec![("htop".into(), "htop -t".into())]);
-        let icon = crate::programs::icon("htop").unwrap();
+        assert_eq!(crate::programs::load(), vec![("Htop".into(), "htop -t".into())]);
+        let icon = crate::programs::icon("Htop").unwrap();
         assert_eq!(&icon[..2], &["y.......".to_string(), "f.......".to_string()]);
         // in Apps > Programs, not on the Apps menu itself, and on the desktop
         let top = d.start_items();
-        assert!(!top.iter().any(|i| i.label == "htop"));
+        assert!(!top.iter().any(|i| i.label == "Htop"));
         let progs = &top.iter().find(|i| i.label == "Programs").unwrap().sub;
-        assert!(progs.iter().any(|i| i.label == "htop"));
-        assert!(d.icons.iter().any(|i| i.label == "htop" && matches!(i.icon, Icon::Custom(_))));
+        assert!(progs.iter().any(|i| i.label == "Htop"));
+        assert!(d.icons.iter().any(|i| i.label == "Htop" && matches!(i.icon, Icon::Custom(_))));
         // drag an icon somewhere else: it snaps to the grid and stays there
         let (x, y) = d.icon_pos(0);
         let name = d.icons[0].label.clone();
@@ -2439,12 +2434,13 @@ mod tests {
         d.refresh_programs();
         assert!(d.icons.iter().any(|i| i.label == "b.bmp"));
         // the same command again replaces it; Remove takes it off both
-        crate::programs::add("htop", None);
+        assert_eq!(crate::programs::add("htop", None), "Htop");
         assert_eq!(crate::programs::load().len(), 1);
-        assert!(crate::programs::icon("htop").is_none());
-        d.exec(Cmd::Forget("htop".into()), Owner::Start);
+        assert!(crate::programs::icon("Htop").is_none());
+        d.exec(Cmd::Forget("Htop".into()), Owner::Start);
         assert!(crate::programs::load().is_empty());
-        assert!(!d.icons.iter().any(|i| i.label == "htop"));
+        assert!(!d.icons.iter().any(|i| i.label == "Htop"));
+        assert_eq!(crate::programs::name_of("/usr/bin/scribe-tui --x"), "Scribe");
         assert_eq!(crate::programs::missing("surely-not-a-real-program --x").as_deref(), Some("surely-not-a-real-program"));
         assert_eq!(crate::programs::missing("sh -c true"), None);
         let _ = std::fs::remove_dir_all(&dir);
