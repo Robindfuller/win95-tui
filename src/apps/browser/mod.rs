@@ -2,6 +2,7 @@
 // site's own colour for its name, headings and rules, its logo and pictures in
 // chunky pixels, and links you click. No JavaScript, so it suits reading:
 // articles, wikis, forums, search results.
+mod chrome;
 mod fetch;
 mod page;
 

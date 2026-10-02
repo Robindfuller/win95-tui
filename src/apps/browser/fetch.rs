@@ -60,10 +60,35 @@ pub fn load(agent: Agent, ticket: u64, req: Req, tx: Sender<Msg>) {
     });
 }
 
+/// Sites whose new pages won't open without a full browser, but have a plain one.
+fn plainer(mut u: Url) -> Url {
+    if matches!(u.host_str(), Some("reddit.com" | "www.reddit.com")) {
+        let _ = u.set_host(Some("old.reddit.com"));
+    }
+    u
+}
+
+/// Files that aren't web pages, which a plain fetch handles better.
+fn file_like(u: &Url) -> bool {
+    let p = u.path().to_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".txt", ".md", ".json", ".pdf", ".zip"].iter().any(|e| p.ends_with(e))
+}
+
 fn get_page(agent: &Agent, req: Req) -> Page {
+    let req = match req {
+        Req::Get(u) => Req::Get(plainer(u)),
+        r => r,
+    };
     let url = match &req {
         Req::Get(u) | Req::Post(u, _) => u.clone(),
     };
+    if let Req::Get(u) = &req {
+        if matches!(u.scheme(), "http" | "https") && !file_like(u) {
+            if let Some((fin, html)) = super::chrome::get(u) {
+                return page::parse(&html, fin);
+            }
+        }
+    }
     if url.scheme() == "file" {
         return match url.to_file_path().ok().and_then(|p| std::fs::read(p).ok()) {
             Some(b) => from_bytes(url, None, b),
