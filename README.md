@@ -28,7 +28,6 @@ doesn't work over SSH.
 - **Paint**: pencil, brush, eraser, fill, line and rectangle with the Windows
   95 colours; left and right click paint in two colours, Ctrl+Z undoes, and
   pictures save as .bmp. Each pixel is two cells wide so it comes out square.
-- **Web**: elinks (or lynx, or w3m) in a window, when one is installed.
 - **Amp**: a Winamp-style music and internet radio player, played by mpv.
   The screen has a big clock, the scrolling title, bitrate and a spectrum
   (or scope) of what's playing; under it the seek bar, buttons, volume and

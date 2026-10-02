@@ -441,9 +441,6 @@ impl Desktop {
             item("Files", Icon::Folder, Launch::Explorer(home())),
             item("Notes", Icon::Notepad, Launch::Notepad(None)),
         ];
-        if let Some(b) = browser() {
-            v.push(item("Web", Icon::Web, Launch::shell("Web", Icon::Web, Some(&b))));
-        }
         if has("btop") {
             v.push(item("Monitor", Icon::Monitor, Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
         }

@@ -247,12 +247,6 @@ pub struct Desktop {
     painter: crate::wallpaper::Painter,
 }
 
-/// A text web browser to open in a window, if one is installed.
-fn browser() -> Option<String> {
-    const START: &str = "https://lite.duckduckgo.com/lite/";
-    ["elinks", "lynx", "w3m"].iter().find(|b| has(b)).map(|b| format!("{b} {START}"))
-}
-
 fn has(cmd: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
 }
@@ -371,9 +365,6 @@ impl Desktop {
         ];
         if has("btop") {
             v.push(d(Icon::Monitor, "Monitor", Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
-        }
-        if let Some(b) = browser() {
-            v.push(d(Icon::Web, "Web", Launch::shell("Web", Icon::Web, Some(&b))));
         }
         if has("nvim") {
             v.push(d(Icon::Vim, "Vim", Launch::shell("Vim", Icon::Vim, Some("nvim"))));
@@ -821,9 +812,6 @@ impl Desktop {
         ];
         if has("btop") {
             progs.push(Item::new("Monitor", shell("Monitor", Icon::Monitor, Some("btop"))).icon(Icon::Monitor));
-        }
-        if let Some(b) = browser() {
-            progs.push(Item::new("Web", shell("Web", Icon::Web, Some(&b))).icon(Icon::Web));
         }
         progs.push(Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal));
         if has("nvim") {
