@@ -176,8 +176,13 @@ impl Desktop {
         let full = self.full_win();
         let (rects, _) = self.tile_rects();
         let (sw, sh) = (self.w, self.h);
+        let alone = self.alone.as_ref().map(|a| a.id);
         for w in &mut self.wins {
             w.tiled = !w.float;
+            // the one app the desktop is collapsed to stays where it is
+            if alone == Some(w.id) {
+                continue;
+            }
             w.hidden = w.ws != cur || (full.is_some() && full != Some(w.id) && !w.float);
             if w.hidden {
                 continue;

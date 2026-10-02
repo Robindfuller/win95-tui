@@ -60,6 +60,8 @@ pub struct Win {
     /// what the dock knows it as, and how to start another
     key: String,
     relaunch: Option<Launch>,
+    /// collapsed to just this app: it fills the terminal, title bar and all
+    alone: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -69,6 +71,8 @@ enum Part {
     Min,
     Max,
     Close,
+    /// collapse the desktop to just this app, or bring it back
+    Alone,
     Frame,
     Bar(i32),
     Client(i32, i32),
@@ -98,6 +102,31 @@ impl Win {
         self.x + self.w - 2
     }
 
+    /// Where the "just this app" button starts, for windows that have one.
+    fn alone_x(&self) -> Option<i32> {
+        let r = self.buttons_x();
+        if self.alone {
+            Some(r - 6)
+        } else if self.app.dialog() {
+            None
+        } else if self.tiled {
+            Some(r - 6)
+        } else {
+            Some(if self.app.resizable() { r - 13 } else { r - 10 })
+        }
+    }
+
+    /// Where the title text has to stop, before the buttons.
+    fn title_end(&self, tiling: bool) -> i32 {
+        let r = self.buttons_x();
+        match self.alone_x() {
+            Some(a) => a - 1,
+            None if self.app.dialog() || tiling && self.tiled => r - 3,
+            None if self.app.resizable() => r - 10,
+            None => r - 7,
+        }
+    }
+
     fn hit(&self, x: i32, y: i32) -> Option<Part> {
         if !self.contains(x, y) {
             return None;
@@ -110,6 +139,12 @@ impl Win {
             }
             if (r - 2..=r).contains(&x) {
                 return Some(Part::Close);
+            }
+            if self.alone_x().is_some_and(|a| (a..=a + 2).contains(&x)) {
+                return Some(Part::Alone);
+            }
+            if self.alone {
+                return Some(Part::Title);
             }
             if !dialog && (r - 6..=r - 4).contains(&x) && self.app.resizable() {
                 return Some(Part::Max);
@@ -201,6 +236,14 @@ struct DeskIcon {
     was_sel: bool,
 }
 
+/// The desktop collapsed to one app: its window, the first id of the
+/// dialogs it opens after, and where the window was before.
+struct Alone {
+    id: u64,
+    since: u64,
+    was: (i32, i32, i32, i32, bool),
+}
+
 pub struct Desktop {
     pub th: Theme,
     theme_mtime: Option<SystemTime>,
@@ -226,6 +269,8 @@ pub struct Desktop {
     pub quit: bool,
     /// running one app on its own: its window fills the terminal, and closing it quits
     solo: Option<u64>,
+    /// the desktop collapsed to just one app
+    alone: Option<Alone>,
     /// the session server should let go of this terminal
     pub detach: bool,
     /// show where the mouse is with a block
@@ -267,7 +312,8 @@ Alt+F4              Close window\n\
 Alt+Space           Window menu (Move/Size with arrows)\n\
 Ctrl+Alt+Del        Task list\n\
 Shift+PgUp/PgDn     Scroll back in a terminal\n\
-Double-click title  Maximise\n\n\
+Double-click title  Maximise\n\
+Alt+J or ⊡          Just this app; Ctrl+Esc brings the desktop back\n\n\
 Omarchy desktop (Apps > Settings): tiled windows,\n\
 a bar on top and a dock at the bottom edge.\n\
 Alt+Enter           Terminal\n\
@@ -289,6 +335,7 @@ impl Desktop {
             theme_check: Instant::now(),
             wins: vec![],
             solo: None,
+            alone: None,
             focus: None,
             next_id: 1,
             w: w as i32,
@@ -577,6 +624,9 @@ impl Desktop {
         if self.solo == Some(id) {
             self.quit = true;
         }
+        if self.alone.as_ref().is_some_and(|a| a.id == id) {
+            self.alone = None;
+        }
         if let Some(i) = self.idx(id) {
             self.wins.remove(i);
         }
@@ -620,7 +670,57 @@ impl Desktop {
             Sys::Float => self.toggle_float(id),
             Sys::Full => self.toggle_full(id),
             Sys::ToWs(n) => self.move_to_ws(id, n),
+            Sys::Alone => self.toggle_alone(id),
         }
+    }
+
+    /// Collapses the desktop to just this app, or brings it back.
+    fn toggle_alone(&mut self, id: u64) {
+        if self.alone.as_ref().is_some_and(|a| a.id == id) {
+            return self.unalone();
+        }
+        self.unalone();
+        let since = self.next_id;
+        let Some(w) = self.win(id) else { return };
+        if w.app.dialog() {
+            return;
+        }
+        let was = (w.x, w.y, w.w, w.h, w.max);
+        w.alone = true;
+        self.alone = Some(Alone { id, since, was });
+        self.menu = None;
+        self.kbmode = None;
+        self.focus_win(id);
+        self.fit_alone();
+    }
+
+    fn unalone(&mut self) {
+        let Some(a) = self.alone.take() else { return };
+        if let Some(w) = self.win(a.id) {
+            (w.x, w.y, w.w, w.h, w.max) = a.was;
+            w.alone = false;
+            w.sync();
+        }
+        self.relayout();
+    }
+
+    /// The one app fills the terminal under its title bar, the frame just off
+    /// the sides and bottom.
+    fn fit_alone(&mut self) {
+        let Some(id) = self.alone.as_ref().map(|a| a.id) else { return };
+        let (sw, sh) = (self.w, self.h);
+        let Some(w) = self.win(id) else { return };
+        (w.min, w.hidden) = (false, false);
+        if (w.x, w.y, w.w, w.h) != (-1, 0, sw + 2, sh + 1) {
+            (w.x, w.y, w.w, w.h, w.max) = (-1, 0, sw + 2, sh + 1, true);
+            w.sync();
+        }
+    }
+
+    /// Whether a window shows: all of them, or with the desktop collapsed,
+    /// the one app and dialogs opened since.
+    fn shown(&self, w: &Win) -> bool {
+        self.alone.as_ref().is_none_or(|a| w.id == a.id || w.id >= a.since)
     }
 
     /// Runs one app on its own, as if it were the only program.
@@ -725,6 +825,10 @@ impl Desktop {
     }
 
     fn add(&mut self, app: Box<dyn App>) {
+        // another app opening brings the desktop back; a dialog stays with the one app
+        if self.alone.is_some() && !app.dialog() {
+            self.unalone();
+        }
         let has_bar = !app.menubar().is_empty();
         let (cw, ch) = app.size_hint();
         let (sw, sh) = (self.w, self.work_h());
@@ -765,6 +869,7 @@ impl Desktop {
             hidden: false,
             key,
             relaunch: None,
+            alone: false,
         };
         win.sync();
         self.wins.push(win);
@@ -989,12 +1094,19 @@ impl Desktop {
     fn open_sys(&mut self, id: u64) {
         let Some(w) = self.wins.iter().find(|w| w.id == id) else { return };
         let (res, dialog) = (w.app.resizable(), w.app.dialog());
+        let alone = Item::new("Just This App", Cmd::Sys(Sys::Alone)).checked(w.alone).enabled(!dialog).key("Alt+J");
+        if w.alone {
+            let items = vec![alone, Item::sep(), Item::new("Close", Cmd::Sys(Sys::Close)).key("Alt+F4")];
+            let (x, y) = (w.x + 2, w.y + 1);
+            return self.open_menu(Owner::Sys(id), items, x, y, false);
+        }
         if self.tiling {
             let to = (0..tiling::WORKSPACES).map(|n| Item::new(format!("Workspace {}", n + 1), Cmd::Sys(Sys::ToWs(n))).checked(w.ws == n)).collect();
             let mut items = vec![
                 Item::new("Float", Cmd::Sys(Sys::Float)).checked(w.float).enabled(res && !dialog).key("Alt+T"),
                 Item::new("Fullscreen", Cmd::Sys(Sys::Full)).checked(w.full).enabled(!dialog).key("Alt+F"),
                 Item::sub("Move to", to).enabled(!dialog),
+                alone,
             ];
             if w.float {
                 items.push(Item::new("Move", Cmd::Sys(Sys::Move)));
@@ -1009,6 +1121,7 @@ impl Desktop {
             Item::new("Size", Cmd::Sys(Sys::Size)).enabled(res && !w.max),
             Item::new("Minimize", Cmd::Sys(Sys::Minimize)).enabled(!dialog),
             Item::new("Maximize", Cmd::Sys(Sys::Maximize)).enabled(res && !w.max),
+            alone,
             Item::sep(),
             Item::new("Close", Cmd::Sys(Sys::Close)).key("Alt+F4"),
         ];
@@ -1308,11 +1421,28 @@ impl Desktop {
             self.menu_key(k);
             return;
         }
-        if self.tiling && self.tiling_key(k) {
+        let (alt, ctrl) = (k.modifiers.contains(KeyModifiers::ALT), k.modifiers.contains(KeyModifiers::CONTROL));
+        if self.alone.is_some() {
+            // the Apps menu keys bring the desktop back; switching windows waits till then
+            match k.code {
+                KeyCode::Esc if ctrl => return self.unalone(),
+                KeyCode::Char('s') if alt && !ctrl => return self.unalone(),
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('`') if alt => return,
+                _ => {}
+            }
+        }
+        // collapsed, the Omarchy keys only open and close things
+        let tiling_keys = self.alone.is_none() || matches!(k.code, KeyCode::Enter | KeyCode::Char(' ' | 'w' | 'W'));
+        if self.tiling && tiling_keys && self.tiling_key(k) {
             return;
         }
-        let (alt, ctrl) = (k.modifiers.contains(KeyModifiers::ALT), k.modifiers.contains(KeyModifiers::CONTROL));
         match k.code {
+            KeyCode::Char('j' | 'J') if alt && !ctrl && self.solo.is_none() => {
+                if let Some(id) = self.focus {
+                    self.toggle_alone(id);
+                }
+                return;
+            }
             KeyCode::Esc if ctrl && self.solo.is_none() => return self.open_start(),
             KeyCode::Char('s') if alt && !ctrl && self.solo.is_none() => return self.open_start(),
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('`') if alt => return self.cycle(),
@@ -1359,7 +1489,7 @@ impl Desktop {
     }
 
     fn win_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.wins.iter().rposition(|w| w.contains(x, y))
+        self.wins.iter().rposition(|w| w.contains(x, y) && self.shown(w))
     }
 
     fn double(&mut self, x: i32, y: i32) -> bool {
@@ -1466,7 +1596,9 @@ impl Desktop {
             MouseEventKind::Up(b) => self.mouse_up(b, x, y, m.modifiers),
             MouseEventKind::Drag(b) => self.mouse_drag(b, x, y, m.modifiers),
             MouseEventKind::Moved => {
-                self.dock_hover(x, y);
+                if self.alone.is_none() {
+                    self.dock_hover(x, y);
+                }
                 self.menu_hover(x, y);
                 if self.menu.is_none() {
                     if let (Some(id), Some(i)) = (self.focus, self.win_at(x, y)) {
@@ -1563,7 +1695,7 @@ impl Desktop {
         if self.kbmode.is_some() {
             self.kbmode = None;
         }
-        if self.tiling {
+        if self.tiling && self.alone.is_none() {
             if self.dock_visible() && self.dock_layout().contains(x, y) {
                 return self.dock_click(b, x, y);
             }
@@ -1581,7 +1713,7 @@ impl Desktop {
                 }
             }
         }
-        if !self.tiling && y == self.h - 1 {
+        if !self.tiling && self.alone.is_none() && y == self.h - 1 {
             match self.taskbar_hit(x) {
                 Some(TaskHit::Start) => {
                     self.open_start();
@@ -1609,7 +1741,7 @@ impl Desktop {
             self.focus_win(id);
             let Some(part) = part else { return };
             match part {
-                Part::Close | Part::Max | Part::Min if b == MouseButton::Left => self.drag = Drag::Button { id, part },
+                Part::Close | Part::Max | Part::Min | Part::Alone if b == MouseButton::Left => self.drag = Drag::Button { id, part },
                 Part::Icon => {
                     if self.double(x, y) {
                         self.close(id);
@@ -1617,11 +1749,16 @@ impl Desktop {
                         self.open_sys(id);
                     }
                 }
-                Part::Title | Part::Close | Part::Max | Part::Min => {
+                Part::Title | Part::Close | Part::Max | Part::Min | Part::Alone => {
                     if b == MouseButton::Right {
                         self.open_sys(id);
                         if let Some((m, _)) = &mut self.menu {
                             m.levels[0].x = x;
+                        }
+                    } else if self.wins.last().unwrap().alone {
+                        // nothing to move: a double-click brings the desktop back
+                        if self.double(x, y) {
+                            self.unalone();
                         }
                     } else if self.double(x, y) {
                         self.toggle_max(id);
@@ -1712,6 +1849,7 @@ impl Desktop {
                         Part::Close => self.close(id),
                         Part::Max => self.toggle_max(id),
                         Part::Min => self.minimize(id),
+                        Part::Alone => self.toggle_alone(id),
                         _ => {}
                     }
                 }
@@ -1909,6 +2047,7 @@ impl Desktop {
 
     pub fn render(&mut self, f: &mut Frame) {
         self.fit_solo();
+        self.fit_alone();
         let th = self.th.clone();
         let mut c = Canvas::new(f.buffer_mut());
         self.render_back(&mut c, &th);
@@ -1916,7 +2055,7 @@ impl Desktop {
         if self.tiling && !self.wins.iter().any(|w| !w.hidden && !w.min) {
             self.render_empty_hint(&mut c, &th);
         }
-        let icons = if self.tiling || self.solo.is_some() { &[][..] } else { &self.icons[..] };
+        let icons = if self.tiling || self.solo.is_some() || self.alone.is_some() { &[][..] } else { &self.icons[..] };
         let shade = self.back.shade && self.back.custom();
         for (i, ic) in icons.iter().enumerate() {
             let (x, y) = self.icon_pos(i);
@@ -1949,7 +2088,7 @@ impl Desktop {
             None => None,
         };
         // tiles first, floating windows over them
-        let mut zs: Vec<usize> = (0..self.wins.len()).filter(|&i| !self.wins[i].min && !self.wins[i].hidden).collect();
+        let mut zs: Vec<usize> = (0..self.wins.len()).filter(|&i| !self.wins[i].min && !self.wins[i].hidden && self.shown(&self.wins[i])).collect();
         zs.sort_by_key(|&i| !self.wins[i].tiled);
         let swap_to = match self.drag {
             Drag::Swap { id } => self.hover.and_then(|(x, y)| self.swap_target(id, x, y)),
@@ -1965,10 +2104,11 @@ impl Desktop {
             let (x, y, w, h) = self.snap_rect(s);
             c.frame(x, y, w, h, Style::new().fg(th.accent));
         }
-        // an app run on its own has no taskbar
-        if self.solo.is_none() && !self.tiling {
+        // an app run on its own, or the desktop collapsed to one, has no taskbar
+        let bare = self.solo.is_some() || self.alone.is_some();
+        if !bare && !self.tiling {
             self.render_taskbar(&mut c, &th);
-        } else if self.solo.is_none() {
+        } else if !bare {
             if self.full_win().is_none() {
                 self.render_top(&mut c, &th);
             }
@@ -2002,7 +2142,7 @@ impl Desktop {
                 if let Some((cx, cy)) = w.app.cursor() {
                     let (ox, oy, cw, ch) = w.client();
                     let (x, y) = (ox + cx as i32, oy + cy as i32);
-                    let bottom = if !self.tiling { self.h - 1 } else if self.dock_visible() { self.dock_layout().y - 1 } else { self.h };
+                    let bottom = if self.alone.is_some() { self.h } else if !self.tiling { self.h - 1 } else if self.dock_visible() { self.dock_layout().y - 1 } else { self.h };
                     if (cx as i32) < cw && (cy as i32) < ch && x >= 0 && y >= 0 && x < self.w && y < bottom {
                         f.set_cursor_position(Position::new(x as u16, y as u16));
                     }
@@ -2105,10 +2245,13 @@ fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, tiling: bool, focused: b
     c.put_c(x + 2, y, g, st(tfg, tbg).add_modifier(Modifier::BOLD));
     let r = w.buttons_x();
     let dialog = w.app.dialog();
-    let title_end = if dialog { r - 3 } else if w.app.resizable() { r - 10 } else { r - 7 };
-    c.text_max(x + 4, y, &w.title, st(tfg, tbg).add_modifier(Modifier::BOLD), title_end);
+    c.text_max(x + 4, y, &w.title, st(tfg, tbg).add_modifier(Modifier::BOLD), w.title_end(false));
     c.button(r - 2, y, 3, "×", th, false, pressed == Some(Part::Close));
-    if !dialog {
+    // pushed in while the desktop is collapsed to this app
+    if let Some(a) = w.alone_x() {
+        c.button(a, y, 3, "⊡", th, false, w.alone || pressed == Some(Part::Alone));
+    }
+    if !dialog && !w.alone {
         if w.app.resizable() {
             c.button(r - 6, y, 3, if w.max { "❐" } else { "□" }, th, false, pressed == Some(Part::Max));
         }
@@ -2152,8 +2295,8 @@ fn draw_frame_lines(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed:
     c.frame(x, y, ww, hh, line);
     let ts = if focused { st(th.accent, th.desk).add_modifier(Modifier::BOLD) } else { st(th.dim, th.desk) };
     let r = w.buttons_x();
-    let dialog = w.app.dialog() || w.tiled;
-    let title_end = if dialog { r - 3 } else if w.app.resizable() { r - 10 } else { r - 7 };
+    let dialog = w.app.dialog() || w.tiled || w.alone;
+    let title_end = w.title_end(true);
     let (g, _) = w.app.icon().glyph(th);
     c.put(x + 1, y, " ", ts);
     c.put_c(x + 2, y, g, ts);
@@ -2167,6 +2310,11 @@ fn draw_frame_lines(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed:
         c.text(bx, y, label, s);
     };
     btn(c, r - 2, " × ", Part::Close);
+    if let Some(a) = w.alone_x() {
+        c.put(a + 3, y, " ", ts);
+        let s = if w.alone || pressed == Some(Part::Alone) { ts.add_modifier(Modifier::REVERSED) } else { ts };
+        c.text(a, y, " ⊡ ", s);
+    }
     if !dialog {
         c.put(r - 3, y, " ", ts);
         if w.app.resizable() {
@@ -2303,6 +2451,44 @@ mod tests {
         assert!(!d.quit);
         d.close(id);
         assert!(d.quit);
+    }
+
+    #[test]
+    fn collapsing_to_one_app_and_back() {
+        let mut d = Desktop::new(120, 40);
+        d.launch(Launch::Notepad(None));
+        let other = d.wins.last().unwrap().id;
+        d.launch(Launch::Mines);
+        let id = d.wins.last().unwrap().id;
+        let before = r(&d);
+        // the ⊡ button on the title bar
+        let (bx, by) = { let w = d.wins.last().unwrap(); (w.alone_x().unwrap() + 1, w.y) };
+        m(&mut d, MouseEventKind::Down(MouseButton::Left), bx, by);
+        m(&mut d, MouseEventKind::Up(MouseButton::Left), bx, by);
+        assert_eq!(d.alone.as_ref().map(|a| a.id), Some(id));
+        // title bar on the top row, the rest of the frame off screen, no taskbar
+        assert_eq!(r(&d), (-1, 0, 122, 41));
+        assert!(!d.shown(d.wins.iter().find(|w| w.id == other).unwrap()));
+        assert_eq!(d.win_at(5, 39).map(|i| d.wins[i].id), Some(id));
+        // pressed again, everything is back where it was
+        let (bx, by) = { let w = d.wins.last().unwrap(); (w.alone_x().unwrap() + 1, w.y) };
+        m(&mut d, MouseEventKind::Down(MouseButton::Left), bx, by);
+        m(&mut d, MouseEventKind::Up(MouseButton::Left), bx, by);
+        assert!(d.alone.is_none());
+        assert_eq!(r(&d), before);
+        // Alt+J and Ctrl+Esc do the same from the keyboard
+        d.event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT)));
+        assert!(d.alone.is_some());
+        d.event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::CONTROL)));
+        assert!(d.alone.is_none());
+        assert!(d.menu.is_none());
+        // opening another app brings the desktop back; closing the one app does too
+        d.toggle_alone(id);
+        d.launch(Launch::Notepad(None));
+        assert!(d.alone.is_none());
+        d.toggle_alone(id);
+        d.close(id);
+        assert!(d.alone.is_none() && !d.quit);
     }
 
     #[test]

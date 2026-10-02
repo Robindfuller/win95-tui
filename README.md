@@ -116,6 +116,12 @@ run just that app, filling the terminal with no title bar, taskbar or session;
 closing it (File > Exit, or Alt+F4) ends it. The names are amp, mplayer, notes,
 paint, mines, solitaire, doom, browser and files.
 
+From a running desktop, the ⊡ button on a window's title bar (or Just This App
+on its right-click menu, or Alt+J) collapses everything down to that one app:
+it fills the terminal under its title bar and the taskbar goes. Press ⊡ again,
+double-click the title, or Ctrl+Esc to bring the desktop back. Opening another
+app or closing this one brings it back too.
+
 ## Sessions
 
 win95 keeps running in the background, like tmux or herdr. Close the terminal

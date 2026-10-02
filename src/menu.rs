@@ -26,6 +26,8 @@ pub enum Sys {
     Float,
     Full,
     ToWs(usize),
+    /// collapse the desktop to just this app, or bring it back
+    Alone,
 }
 
 #[derive(Clone, Debug)]
