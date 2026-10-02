@@ -5,6 +5,7 @@ pub mod launcher;
 pub mod mines;
 pub mod notepad;
 pub mod paint;
+pub mod solitaire;
 pub mod tabs;
 pub mod term;
 
@@ -17,6 +18,7 @@ pub enum Launch {
     Shell { cmd: Option<String>, cwd: Option<PathBuf>, title: String, icon: Icon, keep_open: bool },
     Notepad(Option<PathBuf>),
     Mines,
+    Solitaire,
     Paint(Option<PathBuf>),
     /// a file nothing in here opens, handed to the system (xdg-open)
     External(PathBuf),

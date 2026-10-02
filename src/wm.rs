@@ -9,6 +9,7 @@ use crate::{
         explorer::Explorer,
         launcher::Launcher,
         mines::Mines,
+        solitaire::Solitaire,
         notepad::Notepad,
         paint::Paint,
         tabs::Tabs,
@@ -363,6 +364,7 @@ impl Desktop {
             d(Icon::Terminal, "Terminal", Launch::shell("Terminal", Icon::Terminal, None)),
             d(Icon::Notepad, "Notes", Launch::Notepad(None)),
             d(Icon::Mines, "Mines", Launch::Mines),
+            d(Icon::Solitaire, "Solitaire", Launch::Solitaire),
             d(Icon::Paint, "Paint", Launch::Paint(None)),
         ];
         if has("btop") {
@@ -657,6 +659,7 @@ impl Desktop {
                 Box::new(Tabs::new(Box::new(Notepad::new(p)), &self.th))
             }
             Launch::Mines => Box::new(Mines::new()),
+            Launch::Solitaire => Box::new(Solitaire::new()),
             Launch::Paint(p) => Box::new(Paint::new(p)),
             Launch::External(p) => {
                 let _ = std::process::Command::new("xdg-open")
@@ -803,6 +806,7 @@ impl Desktop {
         let mut progs = vec![
             Item::new("Notes", Cmd::Launch(Launch::Notepad(None))).icon(Icon::Notepad),
             Item::new("Mines", Cmd::Launch(Launch::Mines)).icon(Icon::Mines),
+            Item::new("Solitaire", Cmd::Launch(Launch::Solitaire)).icon(Icon::Solitaire),
             Item::new("Paint", Cmd::Launch(Launch::Paint(None))).icon(Icon::Paint),
         ];
         if has("btop") {

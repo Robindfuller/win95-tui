@@ -96,6 +96,7 @@ pub fn parse_run(s: &str) -> Launch {
     match prog.to_lowercase().as_str() {
         "notepad" | "notes" => Launch::Notepad(arg.map(expand)),
         "mines" | "minesweeper" => Launch::Mines,
+        "solitaire" | "sol" | "cards" => Launch::Solitaire,
         "files" | "explorer" => Launch::Explorer(arg.map(expand).unwrap_or_else(home)),
         "about" => Launch::About,
         "tasks" => Launch::TaskList,

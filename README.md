@@ -8,6 +8,10 @@ Apps inside it:
 
 - **Terminal**: a real shell in a window. Anything runs in it (nvim, btop, lazygit, even this).
 - **Notes**, **Mines**, **Files** (file browser).
+- **Solitaire**: classic Klondike on green felt. Drag cards, or click one then
+  click where it goes; double-click sends a card up top, right-click sends
+  everything that can go. Draw one or three, undo, Windows scoring, and the
+  cards bounce off the table when you win.
 
 In Notes, drag, Shift+arrows or Shift+click to select (double-click for a
 word, Ctrl+A for all), and Ctrl+C, Ctrl+X and Ctrl+V to copy, cut and paste.
