@@ -38,6 +38,13 @@ doesn't work over SSH.
   folders on it, or open music from Files, and they join the playlist of
   the one Amp window. The playlist, favourites and settings are kept in
   ~/.config/win95-tui/amp. It needs mpv; the visualiser uses parec.
+- **Browser**: the web, drawn the desktop's way. Each site keeps its logo,
+  menu and colour, but the page is in your theme, with pictures in chunky
+  pixels. Click links (middle-click for a new tab), type an address or a
+  search after Ctrl+L, Tab and Enter to go link by link, Alt+arrows or
+  Backspace for back and forward. Pages open in a hidden Chromium, so most
+  sites work, including ones behind a Cloudflare check; without Chromium it
+  fetches pages plainly and fewer sites let it in. Searches go to Brave.
 - **Run...** opens any command in its own window.
 
 Add your own with Apps > Add Program...: type the command that starts it and
