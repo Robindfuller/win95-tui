@@ -88,6 +88,11 @@ impl Run {
     }
 }
 
+/// The built-in apps `win95 <name>` runs on their own, filling the terminal.
+pub const SOLO: [&str; 18] = [
+    "notepad", "notes", "mines", "minesweeper", "amp", "winamp", "solitaire", "sol", "cards", "doom", "mplayer", "media", "video", "paint", "mspaint", "browser", "files", "explorer",
+];
+
 pub fn parse_run(s: &str) -> Launch {
     let (prog, arg) = match s.split_once(' ') {
         Some((p, a)) => (p, Some(a.trim())),
@@ -100,6 +105,7 @@ pub fn parse_run(s: &str) -> Launch {
         "solitaire" | "sol" | "cards" => Launch::Solitaire,
         "doom" => Launch::Doom,
         "mplayer" | "media" | "video" => Launch::MediaPlayer(arg.map(expand)),
+        "paint" | "mspaint" => Launch::Paint(arg.map(expand)),
         "browser" | "internet" => Launch::Browser(None),
         "files" | "explorer" => Launch::Explorer(arg.map(expand).unwrap_or_else(home)),
         "about" => Launch::About,

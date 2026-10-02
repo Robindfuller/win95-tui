@@ -224,6 +224,8 @@ pub struct Desktop {
     /// the window the terminal is sending key releases for
     key_releases: Option<u64>,
     pub quit: bool,
+    /// running one app on its own: its window fills the terminal, and closing it quits
+    solo: Option<u64>,
     /// the session server should let go of this terminal
     pub detach: bool,
     /// show where the mouse is with a block
@@ -286,6 +288,7 @@ impl Desktop {
             theme_mtime: theme::mtime(),
             theme_check: Instant::now(),
             wins: vec![],
+            solo: None,
             focus: None,
             next_id: 1,
             w: w as i32,
@@ -571,6 +574,9 @@ impl Desktop {
     }
 
     fn close(&mut self, id: u64) {
+        if self.solo == Some(id) {
+            self.quit = true;
+        }
         if let Some(i) = self.idx(id) {
             self.wins.remove(i);
         }
@@ -614,6 +620,27 @@ impl Desktop {
             Sys::Float => self.toggle_float(id),
             Sys::Full => self.toggle_full(id),
             Sys::ToWs(n) => self.move_to_ws(id, n),
+        }
+    }
+
+    /// Runs one app on its own, as if it were the only program.
+    pub fn solo(&mut self, l: Launch) {
+        self.launch(l);
+        self.solo = self.wins.last().map(|w| w.id);
+        if self.solo.is_none() {
+            self.quit = true;
+        }
+        self.fit_solo();
+    }
+
+    /// The solo window, with its frame and title bar just off the screen.
+    fn fit_solo(&mut self) {
+        let Some(id) = self.solo else { return };
+        let (sw, sh) = (self.w, self.h);
+        let Some(w) = self.win(id) else { return };
+        if (w.x, w.y, w.w, w.h) != (-1, -1, sw + 2, sh + 2) {
+            (w.x, w.y, w.w, w.h, w.max, w.min) = (-1, -1, sw + 2, sh + 2, true, false);
+            w.sync();
         }
     }
 
@@ -1273,8 +1300,8 @@ impl Desktop {
         }
         let (alt, ctrl) = (k.modifiers.contains(KeyModifiers::ALT), k.modifiers.contains(KeyModifiers::CONTROL));
         match k.code {
-            KeyCode::Esc if ctrl => return self.open_start(),
-            KeyCode::Char('s') if alt && !ctrl => return self.open_start(),
+            KeyCode::Esc if ctrl && self.solo.is_none() => return self.open_start(),
+            KeyCode::Char('s') if alt && !ctrl && self.solo.is_none() => return self.open_start(),
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('`') if alt => return self.cycle(),
             KeyCode::F(4) if alt => {
                 if let Some(id) = self.focus {
@@ -1868,6 +1895,7 @@ impl Desktop {
     // ------------------------------------------------------------ drawing
 
     pub fn render(&mut self, f: &mut Frame) {
+        self.fit_solo();
         let th = self.th.clone();
         let mut c = Canvas::new(f.buffer_mut());
         self.render_back(&mut c, &th);
@@ -1875,7 +1903,7 @@ impl Desktop {
         if self.tiling && !self.wins.iter().any(|w| !w.hidden && !w.min) {
             self.render_empty_hint(&mut c, &th);
         }
-        let icons = if self.tiling { &[][..] } else { &self.icons[..] };
+        let icons = if self.tiling || self.solo.is_some() { &[][..] } else { &self.icons[..] };
         let shade = self.back.shade && self.back.custom();
         for (i, ic) in icons.iter().enumerate() {
             let (x, y) = self.icon_pos(i);
@@ -1924,9 +1952,10 @@ impl Desktop {
             let (x, y, w, h) = self.snap_rect(s);
             c.frame(x, y, w, h, Style::new().fg(th.accent));
         }
-        if !self.tiling {
+        // an app run on its own has no taskbar
+        if self.solo.is_none() && !self.tiling {
             self.render_taskbar(&mut c, &th);
-        } else {
+        } else if self.solo.is_none() {
             if self.full_win().is_none() {
                 self.render_top(&mut c, &th);
             }
@@ -2246,6 +2275,21 @@ mod tests {
         }
         key(&mut d, KeyCode::Enter);
         assert_eq!(d.wins.last().unwrap().app.title(), "Solitaire");
+    }
+
+    #[test]
+    fn a_solo_app_fills_the_terminal_and_closing_it_quits() {
+        let mut d = Desktop::new(120, 40);
+        d.solo(Launch::Mines);
+        let id = d.solo.unwrap();
+        // the frame and title bar sit just off the screen
+        assert_eq!(r(&d), (-1, -1, 122, 42));
+        d.resize(100, 30);
+        d.fit_solo();
+        assert_eq!(r(&d), (-1, -1, 102, 32));
+        assert!(!d.quit);
+        d.close(id);
+        assert!(d.quit);
     }
 
     #[test]

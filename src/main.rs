@@ -39,7 +39,9 @@ fn main() -> anyhow::Result<()> {
     if has("stop") {
         return session::stop();
     }
-    if !has("--here") {
+    // `win95 amp` and the like run that one app on its own, filling the terminal
+    let solo = args.get(1).filter(|a| apps::dialogs::SOLO.contains(&a.to_lowercase().as_str())).map(|_| apps::dialogs::parse_run(&args[1..].join(" ")));
+    if solo.is_none() && !has("--here") {
         return session::attach(tiling);
     }
     let mut terminal = ratatui::init();
@@ -50,7 +52,13 @@ fn main() -> anyhow::Result<()> {
     }
     let size = terminal.size()?;
     let mut desk = wm::Desktop::new(size.width, size.height);
-    desk.set_tiling(tiling.unwrap_or_else(theme::saved_tiling), false);
+    match solo {
+        Some(l) => {
+            desk.set_tiling(false, false);
+            desk.solo(l);
+        }
+        None => desk.set_tiling(tiling.unwrap_or_else(theme::saved_tiling), false),
+    }
     let res = run(&mut terminal, &mut desk);
     if kb {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);

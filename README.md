@@ -102,6 +102,13 @@ close, Alt+Space for the window menu, Ctrl+Alt+Del for the task list,
 Shift+PgUp/PgDn to scroll back in a terminal. With the Apps menu open, just
 start typing to search it; Enter opens the top match, Esc clears the search.
 
+## One app on its own
+
+`win95 amp`, `win95 mplayer video.mpg`, `win95 notes todo.txt` and the like
+run just that app, filling the terminal with no title bar, taskbar or session;
+closing it (File > Exit, or Alt+F4) ends it. The names are amp, mplayer, notes,
+paint, mines, solitaire, doom, browser and files.
+
 ## Sessions
 
 win95 keeps running in the background, like tmux or herdr. Close the terminal
