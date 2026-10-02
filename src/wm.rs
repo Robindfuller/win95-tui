@@ -1,13 +1,17 @@
 // The window manager: desktop icons, overlapping windows, taskbar and menus.
 mod tiling;
+mod tray;
 
 use crate::{
     apps::{
+        background::Background,
         dialogs::{about_text, AddProgram, MsgBox, Run, ShutDown, TaskList},
         explorer::Explorer,
         launcher::Launcher,
         mines::Mines,
         notepad::Notepad,
+        paint::Paint,
+        tabs::Tabs,
         term::TermApp,
         Action, App, Launch,
     },
@@ -164,23 +168,38 @@ enum Drag {
     Swap { id: u64 },
     /// tiling: the line between tiles, to make one bigger
     Split(tiling::Split),
+    /// the selected desktop icons, picked up at mx, my. `one`: a click that
+    /// doesn't move picks just the icon clicked out of the selection.
+    Icon { mx: i32, my: i32, moved: bool, one: bool },
+    /// a box dragged out over the desktop to select the icons inside it
+    Band { x0: i32, y0: i32 },
+    /// the volume slider
+    Volume,
 }
 
 enum TaskHit {
     Start,
     Win(u64),
+    Volume,
     Clock,
 }
 
 struct DeskIcon {
+    /// what it's saved as: its name, or "@path" for a shortcut to a file
+    key: String,
     icon: Icon,
     label: String,
     launch: Launch,
+    x: i32,
+    y: i32,
+    sel: bool,
+    /// where it was when picked up, and whether it was selected when a box was started
+    orig: (i32, i32),
+    was_sel: bool,
 }
 
 pub struct Desktop {
     pub th: Theme,
-    lite: bool,
     theme_mtime: Option<SystemTime>,
     theme_check: Instant,
     wins: Vec<Win>,
@@ -195,9 +214,15 @@ pub struct Desktop {
     hover: Option<(i32, i32)>,
     icons: Vec<DeskIcon>,
     sel_icon: Option<usize>,
+    /// where the desktop was right-clicked, for an icon added from there
+    desk_click: (i32, i32),
     last_click: Option<(Instant, i32, i32)>,
     kbmode: Option<(u64, bool)>,
     pub quit: bool,
+    /// the session server should let go of this terminal
+    pub detach: bool,
+    /// show where the mouse is with a block
+    pointer: bool,
     docs: Vec<PathBuf>,
     clock: String,
     /// the programs you added: name, command, icon
@@ -211,6 +236,13 @@ pub struct Desktop {
     ratios: Vec<Vec<f32>>,
     dock_open: bool,
     battery: Option<String>,
+    /// the speaker volume and whether it's muted; None without wpctl
+    vol: Option<(u8, bool)>,
+    /// where the volume popup is, when it's open
+    vol_open: Option<(i32, i32)>,
+    vol_check: Instant,
+    back: crate::wallpaper::Back,
+    painter: crate::wallpaper::Painter,
 }
 
 /// A text web browser to open in a window, if one is installed.
@@ -234,8 +266,7 @@ Alt+F4              Close window\n\
 Alt+Space           Window menu (Move/Size with arrows)\n\
 Ctrl+Alt+Del        Task list\n\
 Shift+PgUp/PgDn     Scroll back in a terminal\n\
-Double-click title  Maximise\n\
-Alt+L               Lite or Classic look\n\n\
+Double-click title  Maximise\n\n\
 Omarchy desktop (Apps > Settings): tiled windows,\n\
 a bar on top and a dock at the bottom edge.\n\
 Alt+Enter           Terminal\n\
@@ -247,13 +278,12 @@ Alt+F / Alt+T       Fullscreen / float\n\
 Super works too where your terminal passes it on.\n\n\
 Colours follow your Omarchy theme as it changes.";
 
-const FIND: &str = r#"printf 'Named: '; read -r q; [ -n "" ] && find ~ -iname "**" -not -path '*/.*' 2>/dev/null | sed "s|^/home/rdf|~|" | head -500"#;
+const FIND: &str = r#"printf 'Named: '; read -r q; [ -n "$q" ] && find ~ -iname "*$q*" -not -path '*/.*' 2>/dev/null | sed "s|^$HOME|~|" | head -500"#;
 
 impl Desktop {
-    pub fn new(w: u16, h: u16, lite: bool) -> Desktop {
+    pub fn new(w: u16, h: u16) -> Desktop {
         let mut d = Desktop {
-            th: Theme::load(lite),
-            lite,
+            th: Theme::load(),
             theme_mtime: theme::mtime(),
             theme_check: Instant::now(),
             wins: vec![],
@@ -267,9 +297,12 @@ impl Desktop {
             hover: None,
             icons: vec![],
             sel_icon: None,
+            desk_click: (0, 0),
             last_click: None,
             kbmode: None,
             quit: false,
+            detach: false,
+            pointer: theme::saved_pointer(),
             docs: vec![],
             clock: clock(),
             mine: vec![],
@@ -279,6 +312,11 @@ impl Desktop {
             ratios: vec![vec![]; tiling::WORKSPACES],
             dock_open: false,
             battery: None,
+            vol: crate::volume::get(),
+            vol_open: None,
+            vol_check: Instant::now(),
+            back: crate::wallpaper::Back::load(),
+            painter: Default::default(),
         };
         d.tick_tiling();
         d.refresh_programs();
@@ -294,36 +332,123 @@ impl Desktop {
                 (name, cmd, icon)
             })
             .collect();
-        let d = |icon: Icon, label: &str, launch: Launch| DeskIcon { icon, label: label.into(), launch };
-        let mut icons = vec![
+        let all = self.desk_catalogue();
+        let make = |(icon, label, launch): (Icon, String, Launch), x, y| DeskIcon { key: label.clone(), icon, label, launch, x, y, sel: false, orig: (x, y), was_sel: false };
+        self.icons = match crate::desktop::load() {
+            Some(saved) => saved
+                .into_iter()
+                .filter_map(|(name, x, y)| match name.strip_prefix('@') {
+                    Some(p) => Some(shortcut(PathBuf::from(p), x, y)),
+                    None => all.iter().find(|(_, l, _)| *l == name).cloned().map(|e| make(e, x, y)),
+                })
+                .collect(),
+            None => {
+                let v = all.into_iter().filter(|(_, l, _)| l != "Files" && l != "Vim");
+                v.enumerate().map(|(i, e)| {
+                    let (x, y) = self.icon_slot(i);
+                    make(e, x, y)
+                }).collect()
+            }
+        };
+        self.sel_icon = None;
+    }
+
+    /// Everything that can go on the desktop: the built-in icons, then the
+    /// programs you added, Trash last.
+    fn desk_catalogue(&self) -> Vec<(Icon, String, Launch)> {
+        let d = |icon: Icon, label: &str, launch: Launch| (icon, label.to_string(), launch);
+        let mut v = vec![
             d(Icon::Computer, "Computer", Launch::Explorer(PathBuf::from("/"))),
             d(Icon::Folder, "Home", Launch::Explorer(home())),
             d(Icon::Terminal, "Terminal", Launch::shell("Terminal", Icon::Terminal, None)),
             d(Icon::Notepad, "Notes", Launch::Notepad(None)),
             d(Icon::Mines, "Mines", Launch::Mines),
+            d(Icon::Paint, "Paint", Launch::Paint(None)),
         ];
         if has("btop") {
-            icons.push(d(Icon::Monitor, "Monitor", Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
+            v.push(d(Icon::Monitor, "Monitor", Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
         }
         if let Some(b) = browser() {
-            icons.push(d(Icon::Web, "Web", Launch::shell("Web", Icon::Web, Some(&b))));
+            v.push(d(Icon::Web, "Web", Launch::shell("Web", Icon::Web, Some(&b))));
         }
         if has("lazygit") {
-            icons.push(d(Icon::Git, "Git", Launch::shell("Git", Icon::Git, Some("lazygit"))));
+            v.push(d(Icon::Git, "Git", Launch::shell("Git", Icon::Git, Some("lazygit"))));
         }
+        if has("nvim") {
+            v.push(d(Icon::Vim, "Vim", Launch::shell("Vim", Icon::Vim, Some("nvim"))));
+        }
+        v.push(d(Icon::Folder, "Files", Launch::Explorer(home())));
         for (name, cmd, icon) in &self.mine {
-            icons.push(d(*icon, name, Launch::shell(name, *icon, Some(cmd))));
+            if !v.iter().any(|(_, l, _)| l == name) {
+                v.push(d(*icon, name, Launch::shell(name, *icon, Some(cmd))));
+            }
         }
-        icons.push(d(Icon::Recycle, "Trash", Launch::Explorer(home().join(".local/share/Trash/files"))));
-        self.icons = icons;
+        v.push(d(Icon::Recycle, "Trash", Launch::Explorer(home().join(".local/share/Trash/files"))));
+        v
+    }
+
+    fn save_icons(&self) {
+        crate::desktop::save(&self.icons.iter().map(|i| (i.key.clone(), i.x, i.y)).collect::<Vec<_>>());
+    }
+
+    /// Puts an icon on the desktop at x, y, or the first free place.
+    fn add_icon(&mut self, name: &str, at: Option<(i32, i32)>) {
+        if self.icons.iter().any(|i| i.key == name) {
+            return;
+        }
+        let Some((icon, label, launch)) = self.desk_catalogue().into_iter().find(|(_, l, _)| l == name) else { return };
+        let (x, y) = match at {
+            Some((x, y)) => self.snap(x, y, &|_| false),
+            None => (0..).map(|i| self.icon_slot(i)).find(|&(x, y)| self.icon_at(x, y).is_none()).unwrap(),
+        };
+        self.icons.push(DeskIcon { key: label.clone(), icon, label, launch, x, y, sel: false, orig: (x, y), was_sel: false });
+        self.save_icons();
+    }
+
+    /// Puts a shortcut to a file or folder on the desktop, in the first free place.
+    fn add_shortcut(&mut self, p: PathBuf) {
+        let key = format!("@{}", p.display());
+        if self.icons.iter().any(|i| i.key == key) {
+            return;
+        }
+        let (x, y) = (0..).map(|i| self.icon_slot(i)).find(|&(x, y)| self.icon_at(x, y).is_none()).unwrap();
+        self.icons.push(shortcut(p, x, y));
+        self.save_icons();
+    }
+
+    /// Selects just icon i, or nothing.
+    fn select_only(&mut self, i: Option<usize>) {
+        for (j, ic) in self.icons.iter_mut().enumerate() {
+            ic.sel = Some(j) == i;
+        }
+        self.sel_icon = i;
+    }
+
+    /// Takes the selected icons off the desktop.
+    fn remove_selected(&mut self) {
+        self.icons.retain(|i| !i.sel);
         self.sel_icon = None;
+        self.save_icons();
+    }
+
+    /// Lines the icons up in columns, by name or in the order they're in now.
+    fn arrange_icons(&mut self, by_name: bool) {
+        if by_name {
+            self.icons.sort_by_key(|i| (i.label == "Trash", i.label.to_lowercase()));
+        } else {
+            let (cw, _) = self.icon_box();
+            self.icons.sort_by_key(|i| (i.x / (cw + 1), i.y));
+        }
+        for i in 0..self.icons.len() {
+            (self.icons[i].x, self.icons[i].y) = self.icon_slot(i);
+        }
+        self.select_only(None);
+        self.save_icons();
     }
 
     fn work_h(&self) -> i32 {
         if self.tiling {
             self.h
-        } else if self.lite {
-            self.h - 2
         } else {
             self.h - 1
         }
@@ -350,7 +475,7 @@ impl Desktop {
             let (ws, tiled) = (w.ws, !w.float);
             self.wins.push(w);
             self.focus = Some(id);
-            self.sel_icon = None;
+            self.select_only(None);
             if self.tiling {
                 if ws != self.cur_ws {
                     self.cur_ws = ws;
@@ -500,6 +625,7 @@ impl Desktop {
         let single = match &l {
             Launch::Run => Some("Run"),
             Launch::AddProgram => Some("Add Program"),
+            Launch::Background => Some("Background"),
             Launch::ShutDown => Some("Quit"),
             Launch::TaskList => Some("Tasks"),
             Launch::Launcher => Some("Launch"),
@@ -515,6 +641,8 @@ impl Desktop {
         let relaunch = key.as_ref().map(|_| l.clone());
         let app: Box<dyn App> = match l {
             Launch::Shell { cmd, cwd, title, icon, keep_open } => match TermApp::new(cmd.as_deref(), cwd, &title, icon, keep_open, &self.th) {
+                // a plain shell can open more in tabs; a program like btop stays as it is
+                Ok(t) if cmd.is_none() => Box::new(Tabs::new(Box::new(t), &self.th)),
                 Ok(t) => Box::new(t),
                 Err(e) => Box::new(MsgBox::new("Terminal".into(), format!("Cannot start {}:\n{e}", cmd.unwrap_or("the shell".into())))),
             },
@@ -526,12 +654,23 @@ impl Desktop {
                         self.docs.remove(0);
                     }
                 }
-                Box::new(Notepad::new(p))
+                Box::new(Tabs::new(Box::new(Notepad::new(p)), &self.th))
             }
             Launch::Mines => Box::new(Mines::new()),
-            Launch::Explorer(p) => Box::new(Explorer::new(p)),
+            Launch::Paint(p) => Box::new(Paint::new(p)),
+            Launch::External(p) => {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&p)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                return;
+            }
+            Launch::Explorer(p) => Box::new(Tabs::new(Box::new(Explorer::new(p)), &self.th)),
             Launch::Run => Box::new(Run::new()),
             Launch::AddProgram => Box::new(AddProgram::new()),
+            Launch::Background => Box::new(Background::new(&self.th)),
             Launch::About => Box::new(MsgBox::new("About".into(), about_text(&self.th))),
             Launch::ShutDown => Box::new(ShutDown::new()),
             Launch::TaskList => Box::new(TaskList::new(self.wins.iter().filter(|w| !w.app.dialog()).map(|w| (w.id, w.title.clone())).collect())),
@@ -558,7 +697,7 @@ impl Desktop {
             ((sw - w) / 2, ((sh - h) / 2).max(self.tiling as i32))
         } else {
             let n = (self.wins.iter().filter(|w| !w.app.dialog()).count() % 8) as i32;
-            let x = (if self.lite { 20 } else { 14 } + n * 3).min((sw - w).max(0));
+            let x = (14 + n * 3).min((sw - w).max(0));
             let y = (1 + n).min((sh - h).max(0));
             (x, y)
         };
@@ -620,7 +759,30 @@ impl Desktop {
                     w.sync();
                 }
             }
-            Action::Refresh => self.refresh_programs(),
+            Action::Refresh => {
+                // a program you've just added gets a desktop shortcut too
+                let old: Vec<String> = self.mine.iter().map(|(n, _, _)| n.clone()).collect();
+                self.refresh_programs();
+                let new: Vec<String> = self.mine.iter().map(|(n, _, _)| n.clone()).filter(|n| !old.contains(n)).collect();
+                for n in new {
+                    self.add_icon(&n, None);
+                }
+            }
+            Action::Background => self.back = crate::wallpaper::Back::load(),
+            Action::Detach => self.detach = true,
+            // a window without tabs opens it on its own
+            Action::OpenTab(l) => self.launch(l),
+            Action::Menu(items, x, y) => {
+                if let Some(w) = self.wins.iter().find(|w| w.id == id) {
+                    let (cx, cy, _, _) = w.client();
+                    self.open_menu(Owner::Ctx(id), items, cx + x, cy + y, false);
+                }
+            }
+            Action::Shortcut(paths) => {
+                for p in paths {
+                    self.add_shortcut(p);
+                }
+            }
             Action::Quit => {
                 self.wins.clear();
                 self.menu = None;
@@ -641,6 +803,7 @@ impl Desktop {
         let mut progs = vec![
             Item::new("Notes", Cmd::Launch(Launch::Notepad(None))).icon(Icon::Notepad),
             Item::new("Mines", Cmd::Launch(Launch::Mines)).icon(Icon::Mines),
+            Item::new("Paint", Cmd::Launch(Launch::Paint(None))).icon(Icon::Paint),
         ];
         if has("btop") {
             progs.push(Item::new("Monitor", shell("Monitor", Icon::Monitor, Some("btop"))).icon(Icon::Monitor));
@@ -656,6 +819,10 @@ impl Desktop {
             progs.push(Item::new("Vim", shell("Vim", Icon::Vim, Some("nvim"))).icon(Icon::Vim));
         }
         progs.push(Item::new("Files", Cmd::Launch(Launch::Explorer(home()))).icon(Icon::Folder));
+        // the programs you added go in with the rest
+        for (name, cmd, icon) in &self.mine {
+            progs.push(Item::new(name.clone(), shell(name, *icon, Some(cmd))).icon(*icon));
+        }
         progs.push(Item::sep());
         progs.push(Item::new("Add Program...", Cmd::Launch(Launch::AddProgram)).icon(Icon::Programs));
         if !self.mine.is_empty() {
@@ -671,21 +838,17 @@ impl Desktop {
                 .map(|p| Item::new(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), Cmd::Launch(Launch::Notepad(Some(p.clone())))).icon(Icon::File))
                 .collect()
         };
-        // the programs you added sit right at the top, under Terminal
         let mut top = vec![Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal)];
-        for (name, cmd, icon) in &self.mine {
-            top.push(Item::new(name.clone(), shell(name, *icon, Some(cmd))).icon(*icon));
-        }
         top.extend(vec![
             Item::sep(),
             Item::sub("Programs", progs).icon(Icon::Programs),
             Item::sub("Recent", docs).icon(Icon::Documents),
             Item::sub("Settings", vec![
                 Item::new("Display", Cmd::Desk("props")).icon(Icon::Computer),
+                Item::new("Background...", Cmd::Launch(Launch::Background)).icon(Icon::Computer),
                 Item::new("Reload Theme", Cmd::Desk("theme")).icon(Icon::Settings),
                 Item::sep(),
-                Item::new("Lite Look", Cmd::Desk("lite")).checked(self.lite).key("Alt+L"),
-                Item::new("Classic Look", Cmd::Desk("classic")).checked(!self.lite),
+                Item::new("Mouse Block", Cmd::Desk("pointer")).checked(self.pointer),
                 Item::sep(),
                 Item::new("Windows Desktop", Cmd::Desk("windows")).checked(!self.tiling),
                 Item::new("Omarchy Desktop", Cmd::Desk("omarchy")).checked(self.tiling),
@@ -777,12 +940,37 @@ impl Desktop {
     }
 
     fn open_desk_menu(&mut self, x: i32, y: i32) {
+        self.desk_click = (x, y);
+        let mut add: Vec<Item> = self
+            .desk_catalogue()
+            .into_iter()
+            .filter(|(_, l, _)| !self.icons.iter().any(|i| i.key == *l))
+            .map(|(icon, l, _)| Item::new(l.clone(), Cmd::AddIcon(l)).icon(icon))
+            .collect();
+        if add.is_empty() {
+            add.push(Item::new("(All there)", Cmd::None).enabled(false));
+        }
         let items = vec![
             Item::new("Terminal Here", Cmd::Launch(Launch::shell("Terminal", Icon::Terminal, None))).icon(Icon::Terminal),
             Item::new("New Text Document", Cmd::Launch(Launch::Notepad(None))).icon(Icon::Notepad),
             Item::sep(),
+            Item::sub("Add Icon", add).icon(Icon::Programs),
+            Item::sub("Arrange Icons", vec![
+                Item::new("By Name", Cmd::Desk("arrange-name")),
+                Item::new("Keep Order", Cmd::Desk("arrange")),
+            ]),
             Item::new("Refresh", Cmd::Desk("theme")),
+            Item::new("Background...", Cmd::Launch(Launch::Background)),
             Item::new("Properties", Cmd::Desk("props")),
+        ];
+        self.open_menu(Owner::Desk, items, x, y, false);
+    }
+
+    fn open_icon_menu(&mut self, x: i32, y: i32) {
+        let items = vec![
+            Item::new("Open", Cmd::Desk("open-icon")),
+            Item::sep(),
+            Item::new("Remove from Desktop", Cmd::Desk("remove-icon")).icon(Icon::Recycle).key("Del"),
         ];
         self.open_menu(Owner::Desk, items, x, y, false);
     }
@@ -809,7 +997,7 @@ impl Desktop {
 
     fn exec(&mut self, cmd: Cmd, owner: Owner) {
         let target = match owner {
-            Owner::Sys(id) | Owner::Bar(id, _) => Some(id),
+            Owner::Sys(id) | Owner::Bar(id, _) | Owner::Ctx(id) => Some(id),
             _ => self.focus,
         };
         match cmd {
@@ -831,13 +1019,29 @@ impl Desktop {
             Cmd::Forget(name) => {
                 crate::programs::remove(&name);
                 self.refresh_programs();
+                self.save_icons();
+            }
+            Cmd::AddIcon(name) => {
+                let (x, y) = self.desk_click;
+                let (cw, _) = self.icon_box();
+                self.add_icon(&name, Some(((x - cw / 2).max(0), (y - 1).max(0))));
             }
             Cmd::Desk(s) => match s {
                 "theme" => self.reload_theme(),
-                "lite" => self.set_lite(true),
                 "windows" => self.set_tiling(false, true),
                 "omarchy" => self.set_tiling(true, true),
-                "classic" => self.set_lite(false),
+                "pointer" => {
+                    self.pointer = !self.pointer;
+                    theme::save_pointer(self.pointer);
+                }
+                "arrange" => self.arrange_icons(false),
+                "arrange-name" => self.arrange_icons(true),
+                "open-icon" => {
+                    if let Some(l) = self.sel_icon.and_then(|i| self.icons.get(i)).map(|i| i.launch.clone()) {
+                        self.launch(l);
+                    }
+                }
+                "remove-icon" => self.remove_selected(),
                 "props" => self.launch(Launch::Msg {
                     title: "Display Properties".into(),
                     text: format!("Theme: {}\n\nColours are read from your current Omarchy theme\nand update live when you switch themes.\n\nScreen area: {} by {} characters", self.th.name, self.w, self.h),
@@ -985,6 +1189,9 @@ impl Desktop {
             }
             return;
         }
+        if self.vol_key(k) {
+            return;
+        }
         if self.menu.is_some() {
             self.menu_key(k);
             return;
@@ -1012,7 +1219,6 @@ impl Desktop {
                 return;
             }
             KeyCode::Delete if ctrl && alt => return self.launch(Launch::TaskList),
-            KeyCode::Char('l') if alt && !ctrl => return self.set_lite(!self.lite),
             _ => {}
         }
         if let Some(id) = self.focus {
@@ -1023,18 +1229,19 @@ impl Desktop {
             return;
         }
         let n = self.icons.len();
-        if self.tiling {
+        if self.tiling || n == 0 {
             return;
         }
         match k.code {
-            KeyCode::Down | KeyCode::Right | KeyCode::Tab => self.sel_icon = Some(self.sel_icon.map(|i| (i + 1) % n).unwrap_or(0)),
-            KeyCode::Up | KeyCode::Left | KeyCode::BackTab => self.sel_icon = Some(self.sel_icon.map(|i| (i + n - 1) % n).unwrap_or(0)),
+            KeyCode::Down | KeyCode::Right | KeyCode::Tab => self.select_only(Some(self.sel_icon.map(|i| (i + 1) % n).unwrap_or(0))),
+            KeyCode::Up | KeyCode::Left | KeyCode::BackTab => self.select_only(Some(self.sel_icon.map(|i| (i + n - 1) % n).unwrap_or(0))),
             KeyCode::Enter => {
                 if let Some(i) = self.sel_icon {
                     let l = self.icons[i].launch.clone();
                     self.launch(l);
                 }
             }
+            KeyCode::Delete => self.remove_selected(),
             _ => {}
         }
     }
@@ -1049,33 +1256,70 @@ impl Desktop {
         d
     }
 
-    fn icon_slot(&self, i: usize) -> (i32, i32) {
-        if self.lite {
-            let per = ((self.work_h() - 1) / 5).max(1) as usize;
-            return (1 + (i / per) as i32 * 12, 1 + (i % per) as i32 * 5);
-        }
-        let per = ((self.work_h() - 1) / 6).max(1) as usize;
-        (1 + (i / per) as i32 * 13, 1 + (i % per) as i32 * 6)
+    /// The spacing of the icon grid.
+    fn grid(&self) -> (i32, i32) {
+        (13, 6)
     }
 
+    fn icon_slot(&self, i: usize) -> (i32, i32) {
+        let (gw, gh) = self.grid();
+        let per = ((self.work_h() - 1) / gh).max(1) as usize;
+        (1 + (i / per) as i32 * gw, 1 + (i % per) as i32 * gh)
+    }
+
+    /// The free grid place nearest x, y, not counting the icons `skip` says.
+    fn snap(&self, x: i32, y: i32, skip: &dyn Fn(usize) -> bool) -> (i32, i32) {
+        let ((gw, gh), (iw, ih)) = (self.grid(), self.icon_box());
+        let cols = ((self.w - 1 - iw) / gw + 1).max(1);
+        let rows = ((self.work_h() - 1) / gh).max(1);
+        let taken = |cx: i32, cy: i32| {
+            (0..self.icons.len()).filter(|&i| !skip(i)).any(|i| {
+                let (ix, iy) = self.icon_pos(i);
+                ix < cx + iw && cx < ix + iw && iy < cy + ih && cy < iy + ih
+            })
+        };
+        (0..cols)
+            .flat_map(|c| (0..rows).map(move |r| (1 + c * gw, 1 + r * gh)))
+            .filter(|&(cx, cy)| !taken(cx, cy))
+            .min_by_key(|&(cx, cy)| (cx - x).pow(2) + (2 * (cy - y)).pow(2))
+            .unwrap_or((x, y))
+    }
+
+    /// How big an icon is, label and all.
+    fn icon_box(&self) -> (i32, i32) {
+        (12, 5)
+    }
+
+    /// Where icon i is drawn: where you put it, kept on the screen.
+    fn icon_pos(&self, i: usize) -> (i32, i32) {
+        self.icon_pos_of(&self.icons[i])
+    }
+
+    fn icon_pos_of(&self, ic: &DeskIcon) -> (i32, i32) {
+        let (w, h) = self.icon_box();
+        (ic.x.clamp(0, (self.w - w).max(0)), ic.y.clamp(0, (self.work_h() - h).max(0)))
+    }
+
+    /// The icon at x, y; the one drawn last when they overlap.
     fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
         if self.tiling {
             return None;
         }
-        (0..self.icons.len()).find(|&i| {
-            let (ix, iy) = self.icon_slot(i);
-            let (w, h) = if self.lite { (11, 4) } else { (12, 5) };
+        let (w, h) = self.icon_box();
+        (0..self.icons.len()).rev().find(|&i| {
+            let (ix, iy) = self.icon_pos(i);
             x >= ix && x < ix + w && y >= iy && y < iy + h
         })
     }
 
     fn taskbar_layout(&self) -> (Vec<(u64, i32, i32)>, i32) {
         let clock_x = self.w - 9;
+        let end = self.tray_x().unwrap_or(clock_x);
         let x0 = 11;
         let mut ids: Vec<&Win> = self.wins.iter().collect();
         ids.sort_by_key(|w| w.id);
         let n = ids.len().max(1) as i32;
-        let bw = ((clock_x - 1 - x0) / n - 1).clamp(4, 24);
+        let bw = ((end - 1 - x0) / n - 1).clamp(4, 24);
         let v = ids.iter().enumerate().map(|(k, w)| (w.id, x0 + k as i32 * (bw + 1), bw)).collect();
         (v, clock_x)
     }
@@ -1087,6 +1331,9 @@ impl Desktop {
         let (v, clock_x) = self.taskbar_layout();
         if x >= clock_x {
             return Some(TaskHit::Clock);
+        }
+        if self.tray_x().is_some_and(|t| x >= t) {
+            return Some(TaskHit::Volume);
         }
         v.into_iter().find(|&(_, bx, bw)| x >= bx && x < bx + bw).map(|(id, _, _)| TaskHit::Win(id))
     }
@@ -1118,6 +1365,9 @@ impl Desktop {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if self.on_speaker(x, y) || self.in_vol_popup(x, y) {
+                    return self.nudge_vol(if m.kind == MouseEventKind::ScrollUp { 5 } else { -5 });
+                }
                 if self.menu.is_some() {
                     return;
                 }
@@ -1167,6 +1417,17 @@ impl Desktop {
     }
 
     fn mouse_down(&mut self, b: MouseButton, x: i32, y: i32, mods: KeyModifiers) {
+        if self.vol_open.is_some() {
+            if self.in_vol_popup(x, y) {
+                self.vol_click(x, y, false);
+                self.drag = Drag::Volume;
+                return;
+            }
+            self.vol_open = None;
+            if self.on_speaker(x, y) {
+                return;
+            }
+        }
         if let Some((m, _)) = &self.menu {
             match m.hit(x, y) {
                 Some((lvl, Some(i))) => return self.activate(lvl, i),
@@ -1221,6 +1482,7 @@ impl Desktop {
                         self.focus_win(id);
                     }
                 }
+                Some(TaskHit::Volume) => self.toggle_vol(),
                 Some(TaskHit::Clock) => self.launch(Launch::Msg {
                     title: "Date/Time Properties".into(),
                     text: chrono::Local::now().format("%A %-d %B %Y\n%H:%M:%S").to_string(),
@@ -1279,18 +1541,50 @@ impl Desktop {
         }
         // The desktop itself.
         self.focus = None;
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
         match self.icon_at(x, y) {
+            Some(i) if ctrl && b == MouseButton::Left => {
+                self.icons[i].sel = !self.icons[i].sel;
+                self.sel_icon = self.icons[i].sel.then_some(i);
+            }
             Some(i) => {
+                let one = self.icons[i].sel;
+                if !one {
+                    self.select_only(Some(i));
+                }
+                // the ones you pick up come to the top, the one clicked last
+                let held = self.icons.remove(i);
+                let (mut sel, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.icons).into_iter().partition(|i| i.sel);
+                sel.push(held);
+                self.icons = rest;
+                for mut ic in sel {
+                    ic.orig = self.icon_pos_of(&ic);
+                    (ic.x, ic.y) = ic.orig;
+                    self.icons.push(ic);
+                }
+                let i = self.icons.len() - 1;
                 self.sel_icon = Some(i);
-                if b == MouseButton::Left && self.double(x, y) {
+                if b == MouseButton::Right {
+                    self.open_icon_menu(x, y);
+                } else if b == MouseButton::Left && self.double(x, y) {
+                    self.select_only(Some(i));
                     let l = self.icons[i].launch.clone();
                     self.launch(l);
+                } else if b == MouseButton::Left {
+                    self.drag = Drag::Icon { mx: x, my: y, moved: false, one };
                 }
             }
             None => {
-                self.sel_icon = None;
+                if !ctrl {
+                    self.select_only(None);
+                }
                 if b == MouseButton::Right {
                     self.open_desk_menu(x, y);
+                } else if b == MouseButton::Left && !self.tiling {
+                    for ic in &mut self.icons {
+                        ic.was_sel = ic.sel;
+                    }
+                    self.drag = Drag::Band { x0: x, y0: y };
                 }
             }
         }
@@ -1316,6 +1610,23 @@ impl Desktop {
                 }
             }
             Drag::Client { id } => self.forward(id, MouseEventKind::Up(b), x, y, mods),
+            Drag::Icon { moved: true, .. } => {
+                // dropped: each settles on the nearest free place on the grid
+                let mut placed = vec![false; self.icons.len()];
+                for i in 0..self.icons.len() {
+                    if self.icons[i].sel {
+                        let (x, y) = self.icon_pos(i);
+                        let skip = |j: usize| self.icons[j].sel && !placed[j];
+                        (self.icons[i].x, self.icons[i].y) = self.snap(x, y, &skip);
+                        placed[i] = true;
+                    }
+                }
+                self.save_icons();
+            }
+            Drag::Icon { moved: false, one: true, .. } => {
+                let i = self.icons.len() - 1;
+                self.select_only(Some(i));
+            }
             Drag::Swap { id } => {
                 if let Some(other) = self.swap_target(id, x, y) {
                     self.swap(id, other);
@@ -1382,6 +1693,27 @@ impl Desktop {
             }
             Drag::Client { id } => self.forward(id, MouseEventKind::Drag(b), x, y, mods),
             Drag::Split(s) => self.drag_split(s, x, y),
+            Drag::Icon { mx, my, one, .. } => {
+                let (iw, ih) = self.icon_box();
+                for ic in self.icons.iter_mut().filter(|i| i.sel) {
+                    ic.x = (ic.orig.0 + x - mx).clamp(0, (sw - iw).max(0));
+                    ic.y = (ic.orig.1 + y - my).clamp(0, (sh - ih).max(0));
+                }
+                self.drag = Drag::Icon { mx, my, moved: true, one };
+                self.last_click = None;
+            }
+            Drag::Band { x0, y0 } => {
+                let (bx, by, bw, bh) = band(x0, y0, x, y);
+                let (iw, ih) = self.icon_box();
+                for i in 0..self.icons.len() {
+                    let (ix, iy) = self.icon_pos(i);
+                    let inside = ix < bx + bw && bx < ix + iw && iy < by + bh && by < iy + ih;
+                    self.icons[i].sel = self.icons[i].was_sel || inside;
+                }
+                self.sel_icon = self.icons.iter().rposition(|i| i.sel);
+                self.last_click = None;
+            }
+            Drag::Volume => self.vol_click(x, y, true),
             Drag::Start | Drag::None => self.menu_hover(x, y),
             _ => {}
         }
@@ -1389,16 +1721,8 @@ impl Desktop {
 
     // ------------------------------------------------------------ tick
 
-    fn set_lite(&mut self, lite: bool) {
-        self.lite = lite;
-        theme::save_lite(lite);
-        self.reload_theme();
-        let (w, h) = (self.w as u16, self.h as u16);
-        self.resize(w, h);
-    }
-
     fn reload_theme(&mut self) {
-        self.th = Theme::load(self.lite);
+        self.th = Theme::load();
         self.theme_mtime = theme::mtime();
         for w in &mut self.wins {
             w.app.theme_changed(&self.th);
@@ -1425,6 +1749,7 @@ impl Desktop {
             self.apply(id, a);
             dirty = true;
         }
+        dirty |= self.tick_vol();
         let c = clock();
         if c != self.clock {
             self.clock = c;
@@ -1446,36 +1771,30 @@ impl Desktop {
     pub fn render(&mut self, f: &mut Frame) {
         let th = self.th.clone();
         let mut c = Canvas::new(f.buffer_mut());
-        c.fill(0, 0, self.w, self.h, st(th.text, th.desk));
+        self.render_back(&mut c, &th);
         let pal = palette(&th);
         if self.tiling && !self.wins.iter().any(|w| !w.hidden && !w.min) {
             self.render_empty_hint(&mut c, &th);
         }
         let icons = if self.tiling { &[][..] } else { &self.icons[..] };
+        let shade = self.back.shade && self.back.custom();
         for (i, ic) in icons.iter().enumerate() {
-            let (x, y) = self.icon_slot(i);
-            if th.lite {
-                let on = self.sel_icon == Some(i);
-                let (_, col) = ic.icon.glyph(&th);
-                let art = Style::new().fg(if on { th.accent } else { col });
-                if let Icon::Custom(rows) = ic.icon {
-                    c.pixels(x + 2, y, rows, &pal);
-                } else {
-                    for (j, line) in ic.icon.lines().iter().enumerate() {
-                        c.text(x + 2, y + j as i32, line, art);
-                    }
-                }
-                let s = if on { th.sel() } else { Style::new().fg(th.text) };
-                let lw = ic.label.chars().count() as i32;
-                c.text_max(x + (11 - lw) / 2, y + 3, &ic.label, s, x + 11);
-                continue;
+            let (x, y) = self.icon_pos(i);
+            if shade {
+                shade_icon(&mut c, &th, ic, x, y);
             }
             c.pixels(x + 2, y, ic.icon.art(), &pal);
-            let on = self.sel_icon == Some(i);
+            let on = ic.sel;
             let s = if on { st(th.on_accent, th.accent) } else { st(th.text, th.desk) };
             for (j, line) in wrap_label(&ic.label).iter().enumerate() {
                 let lw = line.chars().count() as i32;
                 c.text_max(x + (12 - lw) / 2, y + 3 + j as i32, line, s, x + 12);
+            }
+        }
+        if let (Drag::Band { x0, y0 }, Some((hx, hy))) = (&self.drag, self.hover) {
+            let (bx, by, bw, bh) = band(*x0, *y0, hx, hy);
+            if bw > 1 || bh > 1 {
+                c.frame(bx, by, bw, bh, Style::new().fg(th.dim));
             }
         }
         let pressed = match self.drag {
@@ -1519,11 +1838,22 @@ impl Desktop {
         if let Some((m, _)) = &self.menu {
             m.render(&mut c, &th);
         }
+        self.render_vol(&mut c, &th);
         if let Some((id, size)) = self.kbmode {
             let msg = if size { " Size: arrows resize, Shift for bigger steps, Enter when done " } else { " Move: arrows move, Shift for bigger steps, Enter when done " };
             let w = msg.chars().count() as i32;
             c.text((self.w - w) / 2, self.h - 2, msg, st(th.on_accent, th.accent));
             let _ = id;
+        }
+        // The mouse pointer: a solid block, or the letter under it inverted.
+        if let Some((x, y)) = self.hover.filter(|_| self.pointer) {
+            if let Some(cell) = c.cell(x, y) {
+                if matches!(cell.symbol(), " " | "▀" | "▄" | "█") {
+                    cell.set_symbol("█").set_fg(th.text);
+                } else {
+                    cell.modifier.toggle(Modifier::REVERSED);
+                }
+            }
         }
         // Text cursor for the focused app.
         if self.menu.is_none() && self.kbmode.is_none() {
@@ -1540,10 +1870,30 @@ impl Desktop {
         }
     }
 
-    fn render_taskbar(&self, c: &mut Canvas, th: &Theme) {
-        if th.lite {
-            return self.render_taskbar_lite(c, th);
+    /// The desktop behind everything: the picture, the colour you picked, or
+    /// the theme's own.
+    fn render_back(&mut self, c: &mut Canvas, th: &Theme) {
+        let bg = self.back.colour.unwrap_or(th.desk_rgb);
+        let rgb = |p: (u8, u8, u8)| ratatui::style::Color::Rgb(p.0, p.1, p.2);
+        if let Some(px) = self.painter.pixels(&self.back, self.w, self.h, bg) {
+            for y in 0..self.h {
+                for x in 0..self.w {
+                    let (t, b) = (px[(2 * y * self.w + x) as usize], px[((2 * y + 1) * self.w + x) as usize]);
+                    if t == b {
+                        c.put(x, y, " ", Style::new().bg(rgb(b)));
+                    } else {
+                        c.put(x, y, "▀", st(rgb(t), rgb(b)));
+                    }
+                }
+            }
+        } else if let Some(col) = self.back.colour {
+            c.fill(0, 0, self.w, self.h, st(th.text, rgb(col)));
+        } else {
+            c.fill(0, 0, self.w, self.h, st(th.text, th.desk));
         }
+    }
+
+    fn render_taskbar(&self, c: &mut Canvas, th: &Theme) {
         let y = self.h - 1;
         c.fill(0, y, self.w, 1, st(th.text, th.face));
         let start_open = matches!(&self.menu, Some((m, _)) if m.owner == Owner::Start);
@@ -1567,37 +1917,16 @@ impl Desktop {
             c.text_max(bx + 3, y, &w.title, s, bx + bw - 1);
         }
         let s = st(th.text, th.face);
+        if let Some(t) = self.tray_x() {
+            let muted = self.vol.is_some_and(|v| v.1);
+            c.put(t, y, "▏", st(th.shadow, th.face));
+            c.text(t + 1, y, "♪", if muted { st(th.dim, th.face) } else { s });
+        }
         c.put(clock_x, y, "▏", st(th.shadow, th.face));
         c.text(clock_x + 1, y, &format!("  {}  ", self.clock), s);
         c.put(self.w - 1, y, "▕", st(th.hilite, th.face));
     }
 
-    fn render_taskbar_lite(&self, c: &mut Canvas, th: &Theme) {
-        let y = self.h - 1;
-        let line = Style::new().fg(th.dim);
-        c.fill(0, y - 1, self.w, 2, Style::new());
-        for x in 0..self.w {
-            c.put(x, y - 1, "─", line);
-        }
-        let start_open = matches!(&self.menu, Some((m, _)) if m.owner == Owner::Start);
-        let s = if start_open { th.sel() } else { Style::new().fg(th.accent).add_modifier(Modifier::BOLD) };
-        c.fill(0, y, 10, 1, s);
-        c.text(2, y, "❖ Apps", s);
-        c.put(10, y, "│", line);
-        let (v, clock_x) = self.taskbar_layout();
-        for (id, bx, bw) in v {
-            let Some(w) = self.wins.iter().find(|w| w.id == id) else { continue };
-            let active = self.focus == Some(id) && !w.min;
-            let s = if active { th.sel() } else if w.min { Style::new().fg(th.dim) } else { Style::new().fg(th.text) };
-            c.fill(bx, y, bw, 1, s);
-            let (g, col) = w.app.icon().glyph(th);
-            c.put_c(bx + 1, y, g, if active { s } else { Style::new().fg(col) });
-            c.text_max(bx + 3, y, &w.title, s, bx + bw - 1);
-            c.put(bx + bw, y, "│", line);
-        }
-        c.put(clock_x, y, "│", line);
-        c.text(clock_x + 2, y, &self.clock, Style::new().fg(th.text));
-    }
 }
 
 fn wrap_label(label: &str) -> Vec<String> {
@@ -1624,8 +1953,8 @@ fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, tiling: bool, focused: b
     }
     c.blit(&w.buf, cx, cy);
     // the Omarchy desktop always has line borders, whatever the look
-    if th.lite || tiling {
-        return draw_frame_lite(c, th, w, focused, pressed, open_bar);
+    if tiling {
+        return draw_frame_lines(c, th, w, focused, pressed, open_bar);
     }
     let (x, y, ww, hh) = (w.x, w.y, w.w, w.h);
     // Title bar.
@@ -1676,7 +2005,7 @@ fn draw_window(c: &mut Canvas, th: &Theme, w: &mut Win, tiling: bool, focused: b
     }
 }
 
-fn draw_frame_lite(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed: Option<Part>, open_bar: Option<usize>) {
+fn draw_frame_lines(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed: Option<Part>, open_bar: Option<usize>) {
     let (x, y, ww, hh) = (w.x, w.y, w.w, w.h);
     let line = st(if focused { th.accent } else { th.dim }, th.desk);
     c.frame(x, y, ww, hh, line);
@@ -1722,6 +2051,59 @@ fn draw_frame_lite(c: &mut Canvas, th: &Theme, w: &Win, focused: bool, pressed: 
     }
 }
 
+/// A desktop shortcut to a file or folder, opened by what opens that kind of file.
+fn shortcut(p: PathBuf, x: i32, y: i32) -> DeskIcon {
+    DeskIcon {
+        key: format!("@{}", p.display()),
+        icon: crate::assoc::icon(&p),
+        label: crate::assoc::label(&p),
+        launch: crate::assoc::launch(&p),
+        x,
+        y,
+        sel: false,
+        orig: (x, y),
+        was_sel: false,
+    }
+}
+
+/// A dark outline hugging an icon's pixels, and a patch behind its label, so
+/// it shows up on any picture. Works in half-cell pixels like the art does.
+fn shade_icon(c: &mut Canvas, th: &Theme, ic: &DeskIcon, x: i32, y: i32) {
+    let mut px = std::collections::HashSet::new();
+    let cell = |cx: i32, cy: i32, px: &mut std::collections::HashSet<(i32, i32)>| {
+        px.insert((cx, 2 * cy));
+        px.insert((cx, 2 * cy + 1));
+    };
+    let pal = palette(th);
+    for (r, row) in ic.icon.art().iter().enumerate() {
+        for (i, ch) in row.chars().enumerate() {
+            if pal(ch).is_some() {
+                px.insert((x + 2 + i as i32, 2 * y + r as i32));
+            }
+        }
+    }
+    let labels = wrap_label(&ic.label);
+    let bw = 12;
+    for (j, line) in labels.iter().enumerate() {
+        let lw = (line.chars().count() as i32).min(bw);
+        let lx = x + (bw - lw) / 2;
+        for cx in lx..lx + lw {
+            cell(cx, y + 3 + j as i32, &mut px);
+        }
+    }
+    let (r, g, b) = th.desk_rgb;
+    let col = ratatui::style::Color::Rgb(r, g, b);
+    let grown: std::collections::HashSet<(i32, i32)> = px.iter().flat_map(|&(a, b)| (-1..=1).flat_map(move |dx| (-1..=1).map(move |dy| (a + dx, b + dy)))).collect();
+    for (a, b) in grown {
+        c.half(a, b.div_euclid(2), b.rem_euclid(2) == 0, col);
+    }
+}
+
+/// The box between two corners: x, y, width and height.
+fn band(x0: i32, y0: i32, x1: i32, y1: i32) -> (i32, i32, i32, i32) {
+    (x0.min(x1), y0.min(y1), (x1 - x0).abs() + 1, (y1 - y0).abs() + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1746,7 +2128,7 @@ mod tests {
 
     #[test]
     fn dragging_to_an_edge_snaps_and_pulling_off_restores() {
-        let mut d = Desktop::new(120, 40, true);
+        let mut d = Desktop::new(120, 40);
         d.launch(Launch::Notepad(None));
         let (x, y, w, h) = { let w = d.wins.last().unwrap(); (w.x, w.y, w.w, w.h) };
         let sh = d.work_h();
@@ -1778,7 +2160,7 @@ mod tests {
 
     #[test]
     fn tiling_splits_the_screen_and_keeps_workspaces_apart() {
-        let mut d = Desktop::new(120, 40, true);
+        let mut d = Desktop::new(120, 40);
         d.set_tiling(true, false);
         d.launch(Launch::Notepad(None));
         // one window fills everything under the bar
@@ -1810,10 +2192,63 @@ mod tests {
     }
 
     #[test]
+    fn notes_files_and_terminals_open_more_in_tabs() {
+        let mut d = Desktop::new(120, 40);
+        d.launch(Launch::Notepad(None));
+        let id = d.focus.unwrap();
+        let tabs = |d: &Desktop| {
+            let bar = d.wins.last().unwrap().app.menubar();
+            let file = &bar.iter().find(|(n, _)| *n == "File").unwrap().1;
+            if file.iter().find(|i| i.label == "Close Tab").unwrap().enabled { 2 } else { 1 }
+        };
+        assert_eq!(tabs(&d), 1);
+        d.exec(Cmd::App("tab-new"), Owner::Bar(id, 0));
+        assert_eq!((d.wins.len(), tabs(&d)), (1, 2));
+        // the strip shows along the top: clicking the first tab's × closes it
+        let (cx, cy, _, _) = d.wins.last().unwrap().client();
+        let shift_ctrl = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        let tw = ((d.wins.last().unwrap().client().2 - 4) / 2).clamp(6, 26);
+        m(&mut d, MouseEventKind::Down(MouseButton::Left), cx + tw - 2, cy);
+        assert_eq!((d.wins.len(), tabs(&d)), (1, 1));
+        // Ctrl+Shift+T and W from the keyboard; closing the last tab closes the window
+        d.key(KeyEvent::new(KeyCode::Char('T'), shift_ctrl));
+        assert_eq!(tabs(&d), 2);
+        d.key(KeyEvent::new(KeyCode::Char('W'), shift_ctrl));
+        d.key(KeyEvent::new(KeyCode::Char('W'), shift_ctrl));
+        assert!(d.idx(id).is_none());
+    }
+
+    #[test]
+    fn the_tray_speaker_opens_a_volume_slider() {
+        let mut d = Desktop::new(120, 40);
+        d.vol = Some((50, false));
+        let t = d.tray_x().unwrap();
+        let l = MouseButton::Left;
+        m(&mut d, MouseEventKind::Down(l), t + 1, 39);
+        m(&mut d, MouseEventKind::Up(l), t + 1, 39);
+        let (px, py) = d.vol_open.unwrap();
+        // top of the slider is full volume, dragging to the bottom is silence
+        m(&mut d, MouseEventKind::Down(l), px + 5, py + 2);
+        assert_eq!(d.vol, Some((100, false)));
+        m(&mut d, MouseEventKind::Drag(l), px + 5, py + 30);
+        m(&mut d, MouseEventKind::Up(l), px + 5, py + 30);
+        assert_eq!(d.vol, Some((0, false)));
+        // the Mute box, the wheel and the arrow keys
+        m(&mut d, MouseEventKind::Down(l), px + 2, py + 13);
+        assert_eq!(d.vol, Some((0, true)));
+        m(&mut d, MouseEventKind::ScrollUp, t + 1, 39);
+        d.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(d.vol, Some((10, true)));
+        // clicking elsewhere closes it
+        m(&mut d, MouseEventKind::Down(l), 60, 10);
+        assert!(d.vol_open.is_none());
+    }
+
+    #[test]
     fn added_programs_join_the_apps_menu_and_the_desktop() {
         let dir = std::env::temp_dir().join(format!("win95-progs-{}", std::process::id()));
         unsafe { std::env::set_var("HOME", &dir) };
-        let mut d = Desktop::new(120, 40, true);
+        let mut d = Desktop::new(120, 40);
         d.launch(Launch::AddProgram);
         let id = d.focus.unwrap();
         for c in "htop -t".chars() {
@@ -1836,10 +2271,90 @@ mod tests {
         assert_eq!(crate::programs::load(), vec![("htop".into(), "htop -t".into())]);
         let icon = crate::programs::icon("htop").unwrap();
         assert_eq!(&icon[..2], &["y.......".to_string(), "f.......".to_string()]);
-        // on the Apps menu, right under Terminal, and on the desktop
-        let top: Vec<String> = d.start_items().iter().map(|i| i.label.clone()).collect();
-        assert_eq!(&top[..2], &["Terminal".to_string(), "htop".to_string()]);
+        // in Apps > Programs, not on the Apps menu itself, and on the desktop
+        let top = d.start_items();
+        assert!(!top.iter().any(|i| i.label == "htop"));
+        let progs = &top.iter().find(|i| i.label == "Programs").unwrap().sub;
+        assert!(progs.iter().any(|i| i.label == "htop"));
         assert!(d.icons.iter().any(|i| i.label == "htop" && matches!(i.icon, Icon::Custom(_))));
+        // drag an icon somewhere else: it snaps to the grid and stays there
+        let (x, y) = d.icon_pos(0);
+        let name = d.icons[0].label.clone();
+        drag(&mut d, (x + 3, y + 1), (70, 20));
+        let ic = d.icons.iter().find(|i| i.label == name).unwrap();
+        assert_eq!((ic.x, ic.y), (66, 19));
+        d.refresh_programs();
+        let ic = d.icons.iter().find(|i| i.label == name).unwrap();
+        assert_eq!((ic.x, ic.y), (66, 19));
+        // dropped on another icon, it takes the nearest free place instead
+        let (ox, oy) = d.icon_pos(0);
+        let other = d.icons[0].label.clone();
+        drag(&mut d, (68, 20), (ox + 2, oy + 1));
+        let (nx, ny) = d.icons.iter().find(|i| i.label == name).map(|i| (i.x, i.y)).unwrap();
+        assert_ne!((nx, ny), (ox, oy));
+        assert_eq!(((nx - 1) % 13, (ny - 1) % 6), (0, 0));
+        assert_eq!(d.icons.iter().find(|i| i.label == other).map(|i| (i.x, i.y)), Some((ox, oy)));
+        drag(&mut d, (nx + 3, ny + 1), (70, 20));
+        // take it off the desktop with Delete, put it back from the desktop menu
+        m(&mut d, MouseEventKind::Down(l), 68, 20);
+        m(&mut d, MouseEventKind::Up(l), 68, 20);
+        d.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(!d.icons.iter().any(|i| i.label == name));
+        d.refresh_programs();
+        assert!(!d.icons.iter().any(|i| i.label == name));
+        d.open_desk_menu(90, 30);
+        d.menu = None;
+        d.exec(Cmd::AddIcon(name.clone()), Owner::Desk);
+        assert!(d.icons.iter().any(|i| i.label == name && (i.x, i.y) == (79, 31)));
+        // Arrange by name lines them all up in columns again, Trash last
+        d.exec(Cmd::Desk("arrange-name"), Owner::Desk);
+        assert_eq!((d.icons[0].x, d.icons[0].y), d.icon_slot(0));
+        assert_eq!(d.icons.last().unwrap().label, "Trash");
+        let mut names: Vec<String> = d.icons.iter().map(|i| i.label.to_lowercase()).collect();
+        names.pop();
+        assert!(names.windows(2).all(|w| w[0] <= w[1]));
+        // drag a box over the first two to select them, then move both at once
+        let (a, b2) = (d.icons[0].label.clone(), d.icons[1].label.clone());
+        let pos = |d: &Desktop, n: &str| d.icons.iter().find(|i| i.label == n).map(|i| (i.x, i.y)).unwrap();
+        let rest: Vec<_> = d.icons[2..].iter().map(|i| (i.label.clone(), i.x, i.y)).collect();
+        drag(&mut d, (0, 0), (12, 7));
+        assert_eq!(d.icons.iter().filter(|i| i.sel).count(), 2);
+        drag(&mut d, (3, 2), (51, 12));
+        assert_eq!((pos(&d, &a), pos(&d, &b2)), ((53, 13), (53, 19)));
+        assert!(rest.iter().all(|(n, x, y)| pos(&d, n) == (*x, *y)));
+        // a plain click on one of them picks just that one
+        m(&mut d, MouseEventKind::Down(l), 55, 14);
+        m(&mut d, MouseEventKind::Up(l), 55, 14);
+        assert_eq!(d.icons.iter().filter(|i| i.sel).map(|i| i.label.clone()).collect::<Vec<_>>(), vec![a.clone()]);
+        // Ctrl+click adds another, and Delete takes both off
+        d.mouse(MouseEvent { kind: MouseEventKind::Down(l), column: 55, row: 20, modifiers: KeyModifiers::CONTROL });
+        d.mouse(MouseEvent { kind: MouseEventKind::Up(l), column: 55, row: 20, modifiers: KeyModifiers::CONTROL });
+        assert_eq!(d.icons.iter().filter(|i| i.sel).count(), 2);
+        d.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(!d.icons.iter().any(|i| i.label == a || i.label == b2));
+        // Files: right-click opens a menu, and Create Shortcut puts the file on
+        // the desktop, opening in Notes or Paint by its kind
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.txt"), "hello\n").unwrap();
+        image::RgbImage::new(4, 4).save_with_format(docs.join("b.bmp"), image::ImageFormat::Bmp).unwrap();
+        d.launch(Launch::Explorer(docs.clone()));
+        let id = d.focus.unwrap();
+        let (cx, cy, _, _) = d.wins.last().unwrap().client();
+        m(&mut d, MouseEventKind::Down(MouseButton::Right), cx + 4, cy + 2);
+        assert!(matches!(&d.menu, Some((mm, _)) if mm.owner == Owner::Ctx(id)));
+        d.menu = None;
+        for name in ["a", "b"] {
+            d.key(KeyEvent::new(KeyCode::Char(name.chars().next().unwrap()), KeyModifiers::NONE));
+            d.exec(Cmd::App("shortcut"), Owner::Ctx(id));
+        }
+        let a_ic = d.icons.iter().find(|i| i.label == "a.txt").unwrap();
+        assert!(matches!(&a_ic.launch, Launch::Notepad(Some(p)) if *p == docs.join("a.txt")));
+        let b_ic = d.icons.iter().find(|i| i.label == "b.bmp").unwrap();
+        assert!(matches!(&b_ic.launch, Launch::Paint(Some(_))) && b_ic.icon == Icon::Picture);
+        // and they're still there after a reload
+        d.refresh_programs();
+        assert!(d.icons.iter().any(|i| i.label == "b.bmp"));
         // the same command again replaces it; Remove takes it off both
         crate::programs::add("htop", None);
         assert_eq!(crate::programs::load().len(), 1);

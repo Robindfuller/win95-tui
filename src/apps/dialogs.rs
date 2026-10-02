@@ -5,14 +5,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use std::{fs, path::PathBuf};
 
 /// A row of right-aligned buttons along the bottom of a dialog.
-struct Buttons {
+pub(super) struct Buttons {
     labels: Vec<&'static str>,
-    focus: usize,
+    pub(super) focus: usize,
     pressed: Option<usize>,
 }
 
 impl Buttons {
-    fn new(labels: &[&'static str]) -> Buttons {
+    pub(super) fn new(labels: &[&'static str]) -> Buttons {
         Buttons { labels: labels.to_vec(), focus: 0, pressed: None }
     }
     fn layout(&self, w: i32) -> Vec<(i32, i32)> {
@@ -27,16 +27,16 @@ impl Buttons {
             })
             .collect()
     }
-    fn render(&self, c: &mut Canvas, th: &Theme, w: i32, y: i32) {
+    pub(super) fn render(&self, c: &mut Canvas, th: &Theme, w: i32, y: i32) {
         for (i, (x, bw)) in self.layout(w).into_iter().enumerate() {
             c.button(x, y, bw, self.labels[i], th, i == self.focus, self.pressed == Some(i));
         }
     }
-    fn hit(&self, w: i32, x: i32) -> Option<usize> {
+    pub(super) fn hit(&self, w: i32, x: i32) -> Option<usize> {
         self.layout(w).into_iter().position(|(bx, bw)| x >= bx && x < bx + bw)
     }
     /// Shared key handling. Returns a button index when one is activated.
-    fn key(&mut self, k: &KeyEvent) -> Option<usize> {
+    pub(super) fn key(&mut self, k: &KeyEvent) -> Option<usize> {
         match k.code {
             KeyCode::Tab | KeyCode::Right => self.focus = (self.focus + 1) % self.labels.len(),
             KeyCode::BackTab | KeyCode::Left => self.focus = (self.focus + self.labels.len() - 1) % self.labels.len(),
@@ -48,13 +48,6 @@ impl Buttons {
 }
 
 fn icon_art(c: &mut Canvas, th: &Theme, x: i32, y: i32, icon: Icon) {
-    if th.lite && !matches!(icon, Icon::Custom(_)) {
-        let (_, col) = icon.glyph(th);
-        for (j, line) in icon.lines().iter().enumerate() {
-            c.text(x, y + j as i32, line, ratatui::style::Style::new().fg(col));
-        }
-        return;
-    }
     let pal = palette(th);
     c.pixels(x, y, icon.art(), &pal);
 }
@@ -434,12 +427,25 @@ pub fn about_text(th: &Theme) -> String {
 
 pub struct ShutDown {
     buttons: Buttons,
+    /// running as a session, so it can be left running instead
+    session: bool,
     size: (u16, u16),
 }
 
 impl ShutDown {
     pub fn new() -> ShutDown {
-        ShutDown { buttons: Buttons::new(&["Quit", "Cancel"]), size: (0, 0) }
+        let session = crate::session::SERVER.load(std::sync::atomic::Ordering::Relaxed);
+        let mut buttons = Buttons::new(if session { &["Detach", "Quit", "Cancel"] } else { &["Quit", "Cancel"] });
+        buttons.focus = 0;
+        ShutDown { buttons, session, size: (0, 0) }
+    }
+
+    fn button(&self, i: usize) -> Action {
+        match (self.session, i) {
+            (true, 0) => Action::Detach,
+            (true, 1) | (false, 0) => Action::Quit,
+            _ => Action::Close,
+        }
     }
 }
 
@@ -451,7 +457,7 @@ impl App for ShutDown {
         Icon::Shutdown
     }
     fn size_hint(&self) -> (u16, u16) {
-        (44, 5)
+        if self.session { (46, 6) } else { (44, 5) }
     }
     fn resizable(&self) -> bool {
         false
@@ -463,16 +469,21 @@ impl App for ShutDown {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let s = st(th.text, th.face);
         c.fill(0, 0, w, h, s);
-        c.text(2, 1, "Close every window and quit?", s);
+        if self.session {
+            c.text(2, 1, "Detach leaves everything running for next", s);
+            c.text(2, 2, "time. Quit closes every window.", s);
+        } else {
+            c.text(2, 1, "Close every window and quit?", s);
+        }
         self.buttons.render(c, th, w, h - 1);
     }
     fn key(&mut self, k: KeyEvent) -> Action {
         match k.code {
             KeyCode::Esc | KeyCode::Char('n') => Action::Close,
             KeyCode::Char('y') | KeyCode::Char('q') => Action::Quit,
+            KeyCode::Char('d') if self.session => Action::Detach,
             _ => match self.buttons.key(&k) {
-                Some(0) => Action::Quit,
-                Some(_) => Action::Close,
+                Some(i) => self.button(i),
                 None => Action::None,
             },
         }
@@ -480,10 +491,8 @@ impl App for ShutDown {
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, _m: KeyModifiers) -> Action {
         if let MouseEventKind::Down(MouseButton::Left) = kind {
             if y == self.size.1 as i32 - 1 {
-                match self.buttons.hit(self.size.0 as i32, x) {
-                    Some(0) => return Action::Quit,
-                    Some(_) => return Action::Close,
-                    None => {}
+                if let Some(i) = self.buttons.hit(self.size.0 as i32, x) {
+                    return self.button(i);
                 }
             }
         }

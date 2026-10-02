@@ -1,8 +1,11 @@
+pub mod background;
 pub mod dialogs;
 pub mod explorer;
 pub mod launcher;
 pub mod mines;
 pub mod notepad;
+pub mod paint;
+pub mod tabs;
 pub mod term;
 
 use crate::{draw::Canvas, icons::Icon, menu::Item, theme::Theme};
@@ -14,9 +17,13 @@ pub enum Launch {
     Shell { cmd: Option<String>, cwd: Option<PathBuf>, title: String, icon: Icon, keep_open: bool },
     Notepad(Option<PathBuf>),
     Mines,
+    Paint(Option<PathBuf>),
+    /// a file nothing in here opens, handed to the system (xdg-open)
+    External(PathBuf),
     Explorer(PathBuf),
     Run,
     AddProgram,
+    Background,
     About,
     ShutDown,
     TaskList,
@@ -39,8 +46,18 @@ pub enum Action {
     Launch(Launch),
     Resize(u16, u16),
     Quit,
+    /// a right-click menu, at x, y in the window
+    Menu(Vec<Item>, i32, i32),
+    /// open this in a new tab of the same window
+    OpenTab(Launch),
+    /// put shortcuts to these on the desktop
+    Shortcut(Vec<PathBuf>),
+    /// leave the desktop running in the background and close this terminal's view of it
+    Detach,
     /// the programs you added changed: rebuild the menu and desktop
     Refresh,
+    /// the desktop background settings changed
+    Background,
     Many(Vec<Action>),
 }
 
@@ -78,4 +95,12 @@ pub trait App {
         false
     }
     fn theme_changed(&mut self, _th: &Theme) {}
+    /// A short name for its tab.
+    fn tab_title(&self) -> String {
+        self.title()
+    }
+    /// What a new tab of this window opens, for windows that have tabs.
+    fn new_tab(&self) -> Option<Launch> {
+        None
+    }
 }

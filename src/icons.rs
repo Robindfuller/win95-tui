@@ -24,6 +24,8 @@ pub enum Icon {
     Settings,
     Programs,
     Documents,
+    Paint,
+    Picture,
 }
 
 impl Icon {
@@ -45,24 +47,9 @@ impl Icon {
             Icon::Help => ('?', th.accent),
             Icon::Info => ('i', th.accent),
             Icon::Shutdown => ('⏻', th.red),
+            Icon::Paint => ('✎', th.magenta),
+            Icon::Picture => ('▨', th.cyan),
             Icon::Settings => ('⚙', th.dim),
-        }
-    }
-
-    /// Line and braille drawing for the Lite desktop, 7 wide by 3 tall.
-    pub fn lines(self) -> [&'static str; 3] {
-        match self {
-            Icon::Computer => ["╭─────╮", "╰──┬──╯", " ──┴── "],
-            Icon::Folder | Icon::Programs | Icon::Documents => ["╭──╮   ", "│  ╰──╮", "╰─────╯"],
-            Icon::Terminal => ["╭─────╮", "│ ❯ _ │", "╰─────╯"],
-            Icon::Notepad | Icon::File => ["┌────╮ ", "│ ══ │ ", "└────┘ "],
-            Icon::Mines => ["   ╲   ", " ⣴⣿⣿⣦  ", " ⠻⣿⣿⠟  "],
-            Icon::Monitor => ["╭─────╮", "│⣀⡠⠔⠊⠉│", "╰─────╯"],
-            Icon::Git => [" ●──╮  ", " │  ●  ", " ●──╯  "],
-            Icon::Recycle => ["╶─────╴", " │┊┊┊│ ", " ╰───╯ "],
-            Icon::Vim => [" ╲   ╱ ", "  ╲ ╱  ", "   V   "],
-            Icon::Web => [" ╭─┬─╮ ", " ├─┼─┤ ", " ╰─┴─╯ "],
-            _ => ["╭─────╮", "│  ?  │", "╰─────╯"],
         }
     }
 
@@ -140,6 +127,22 @@ impl Icon {
                 "yyggyyyy",
                 ".yyygyy.",
                 "..yyyy..",
+            ],
+            Icon::Paint => &[
+                "..llll..",
+                ".lrlolll",
+                "lllllgll",
+                "lbllll..",
+                ".llpll..",
+                "...ll...",
+            ],
+            Icon::Picture => &[
+                "ffffffff",
+                "fyyyyonf",
+                "fyyyyyyf",
+                "fyygyyyf",
+                "fggggggf",
+                "ffffffff",
             ],
             Icon::Vim => &[
                 "gg....gg",

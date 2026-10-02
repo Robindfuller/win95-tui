@@ -73,6 +73,22 @@ impl<'a> Canvas<'a> {
         cx
     }
 
+    /// Paints the top or bottom half of a cell, keeping the other half.
+    pub fn half(&mut self, x: i32, y: i32, top: bool, col: Color) {
+        let Some(cell) = self.cell(x, y) else { return };
+        let (t, b) = match cell.symbol() {
+            "▀" => (cell.fg, cell.bg),
+            "▄" => (cell.bg, cell.fg),
+            _ => (cell.bg, cell.bg),
+        };
+        let (t, b) = if top { (col, b) } else { (t, col) };
+        if t == b {
+            self.put(x, y, " ", Style::new().bg(t));
+        } else {
+            self.put(x, y, "▀", st(t, b));
+        }
+    }
+
     pub fn text(&mut self, x: i32, y: i32, s: &str, style: Style) -> i32 {
         self.text_max(x, y, s, style, i32::MAX)
     }
@@ -109,9 +125,6 @@ impl<'a> Canvas<'a> {
 
     /// A raised (or sunken) bevel frame drawn with eighth-block edges.
     pub fn bevel(&mut self, x: i32, y: i32, w: i32, h: i32, th: &Theme, raised: bool) {
-        if th.lite {
-            return self.frame(x, y, w, h, Style::new().fg(th.dim));
-        }
         let (lt, rb) = if raised { (th.hilite, th.shadow) } else { (th.shadow, th.hilite) };
         for xx in x..x + w {
             self.put(xx, y, "▔", st(lt, th.face));
@@ -141,23 +154,6 @@ impl<'a> Canvas<'a> {
 
     /// Draws a push button. `w` includes padding.
     pub fn button(&mut self, x: i32, y: i32, w: i32, label: &str, th: &Theme, default: bool, pressed: bool) {
-        if th.lite {
-            let mut s = Style::new().fg(if default { th.accent } else { th.text });
-            if default {
-                s = s.add_modifier(Modifier::BOLD);
-            }
-            if pressed {
-                s = s.add_modifier(Modifier::REVERSED);
-            }
-            self.fill(x, y, w, 1, s);
-            if w >= 4 && !label.is_empty() {
-                self.put(x, y, "[", Style::new().fg(th.dim));
-                self.put(x + w - 1, y, "]", Style::new().fg(th.dim));
-            }
-            let lw = label.chars().count() as i32;
-            self.text(x + (w - lw) / 2, y, label, s);
-            return;
-        }
         let bg = if pressed { th.shadow } else { th.button };
         let mut s = st(th.text, bg);
         if default {
@@ -173,7 +169,7 @@ impl<'a> Canvas<'a> {
 
     /// A sunken single-line text field.
     pub fn field(&mut self, x: i32, y: i32, w: i32, text: &str, th: &Theme) {
-        let s = if th.lite { st(th.text, th.inactive) } else { st(th.text, th.client) };
+        let s = st(th.text, th.client);
         self.fill(x, y, w, 1, s);
         let chars: Vec<char> = text.chars().collect();
         let room = (w - 2).max(0) as usize;

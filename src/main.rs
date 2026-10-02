@@ -1,9 +1,15 @@
 mod apps;
+mod assoc;
+mod clip;
+mod desktop;
 mod draw;
 mod icons;
 mod menu;
 mod programs;
+mod session;
 mod theme;
+mod volume;
+mod wallpaper;
 mod wm;
 
 use crossterm::{
@@ -16,6 +22,26 @@ use std::{
 };
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let has = |a: &str| args.iter().any(|x| x == a);
+    let tiling = if has("--windows") {
+        Some(false)
+    } else if has("--omarchy") {
+        Some(true)
+    } else {
+        None
+    };
+    // win95 keeps running in the background unless --here asks for it to
+    // live and die with this terminal
+    if has("--server") {
+        return session::serve();
+    }
+    if has("stop") {
+        return session::stop();
+    }
+    if !has("--here") {
+        return session::attach(tiling);
+    }
     let mut terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let kb = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -23,23 +49,8 @@ fn main() -> anyhow::Result<()> {
         execute!(stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
     }
     let size = terminal.size()?;
-    let args: Vec<String> = std::env::args().collect();
-    let lite = if args.iter().any(|a| a == "--classic") {
-        false
-    } else if args.iter().any(|a| a == "--lite") {
-        true
-    } else {
-        theme::saved_lite()
-    };
-    let tiling = if args.iter().any(|a| a == "--windows") {
-        false
-    } else if args.iter().any(|a| a == "--omarchy") {
-        true
-    } else {
-        theme::saved_tiling()
-    };
-    let mut desk = wm::Desktop::new(size.width, size.height, lite);
-    desk.set_tiling(tiling, false);
+    let mut desk = wm::Desktop::new(size.width, size.height);
+    desk.set_tiling(tiling.unwrap_or_else(theme::saved_tiling), false);
     let res = run(&mut terminal, &mut desk);
     if kb {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);

@@ -1,7 +1,7 @@
 use super::{Action, App, Launch};
-use crate::{draw::{st, Canvas}, icons::Icon, menu::{Cmd, Item, Sys}, theme::{home, Theme}};
+use crate::{clip, draw::{st, Canvas}, icons::Icon, menu::{Cmd, Item, Sys}, theme::{home, Theme}};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Instant};
 
 pub struct Notepad {
     lines: Vec<Vec<char>>,
@@ -14,6 +14,15 @@ pub struct Notepad {
     size: (u16, u16),
     prompt: Option<String>,
     status: Option<String>,
+    /// where a selection started (line, column); it runs to the cursor
+    anchor: Option<(usize, usize)>,
+    last_click: Option<(Instant, usize, usize)>,
+}
+
+type Span = ((usize, usize), (usize, usize));
+
+fn wordy(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 pub fn expand(p: &str) -> PathBuf {
@@ -41,7 +50,7 @@ impl Notepad {
                 Err(e) => status = Some(format!("Cannot open: {e}")),
             }
         }
-        Notepad { lines, cx: 0, cy: 0, top: 0, left: 0, path, modified: false, size: (60, 18), prompt: None, status }
+        Notepad { lines, cx: 0, cy: 0, top: 0, left: 0, path, modified: false, size: (60, 18), prompt: None, status, anchor: None, last_click: None }
     }
 
     fn text_rows(&self) -> usize {
@@ -67,7 +76,66 @@ impl Notepad {
         }
     }
 
+    /// The selected span, start first, if there's anything in it.
+    fn sel(&self) -> Option<Span> {
+        let (a, b) = (self.anchor?, (self.cy, self.cx));
+        (a != b).then(|| if a < b { (a, b) } else { (b, a) })
+    }
+
+    fn selected(&self) -> Option<String> {
+        let ((y0, x0), (y1, x1)) = self.sel()?;
+        let mut s = String::new();
+        for y in y0..=y1 {
+            let l = &self.lines[y];
+            s.extend(&l[if y == y0 { x0 } else { 0 }..if y == y1 { x1 } else { l.len() }]);
+            if y < y1 {
+                s.push('\n');
+            }
+        }
+        Some(s)
+    }
+
+    /// Remove the selected text, if any. Returns whether there was some.
+    fn delete_sel(&mut self) -> bool {
+        let Some(((y0, x0), (y1, x1))) = self.sel() else {
+            self.anchor = None;
+            return false;
+        };
+        let tail = self.lines[y1].split_off(x1);
+        self.lines[y0].truncate(x0);
+        self.lines[y0].extend(tail);
+        self.lines.drain(y0 + 1..=y1);
+        (self.cy, self.cx) = (y0, x0);
+        self.anchor = None;
+        self.modified = true;
+        true
+    }
+
+    fn copy(&mut self, cut: bool) {
+        if let Some(t) = self.selected() {
+            clip::copy_text(&t);
+            if cut {
+                self.delete_sel();
+            }
+        }
+    }
+
+    fn select_all(&mut self) {
+        self.anchor = Some((0, 0));
+        self.cy = self.lines.len() - 1;
+        self.cx = self.lines[self.cy].len();
+    }
+
+    /// The text position under a point in the window, scrolling a line when
+    /// a drag goes past the top or bottom.
+    fn at(&self, x: i32, y: i32) -> (usize, usize) {
+        let cy = if y < 0 { self.top.saturating_sub(1) } else { (self.top + y as usize).min(self.top + self.text_rows()) };
+        let cy = cy.min(self.lines.len() - 1);
+        (cy, (self.left + x.max(0) as usize).min(self.lines[cy].len()))
+    }
+
     fn insert(&mut self, ch: char) {
+        self.delete_sel();
         if ch == '\n' {
             let rest = self.lines[self.cy].split_off(self.cx);
             self.lines.insert(self.cy + 1, rest);
@@ -106,6 +174,10 @@ impl App for Notepad {
     fn icon(&self) -> Icon {
         Icon::Notepad
     }
+    fn tab_title(&self) -> String {
+        let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or("Untitled".into());
+        format!("{}{}", name, if self.modified { "*" } else { "" })
+    }
     fn size_hint(&self) -> (u16, u16) {
         (64, 18)
     }
@@ -114,9 +186,22 @@ impl App for Notepad {
         let s = st(th.text, th.client);
         c.fill(0, 0, self.size.0 as i32, self.size.1 as i32, s);
         let rows = self.text_rows();
+        let sel = self.sel();
         for (i, line) in self.lines.iter().skip(self.top).take(rows).enumerate() {
             let shown: String = line.iter().skip(self.left).take(self.size.0 as usize).map(|&ch| if ch == '\t' { ' ' } else { ch }).collect();
             c.text_max(0, i as i32, &shown, s, self.size.0 as i32);
+            // selected text, and a cell past the end where the line break is selected
+            let li = self.top + i;
+            if let Some(((y0, x0), (y1, x1))) = sel.filter(|((y0, _), (y1, _))| (*y0..=*y1).contains(&li)) {
+                let (a, b) = (if li == y0 { x0 } else { 0 }, if li == y1 { x1 } else { line.len() + 1 });
+                for ci in a.max(self.left)..b.min(self.left + self.size.0 as usize) {
+                    let ch = match line.get(ci) {
+                        Some('\t') | None => ' ',
+                        Some(&ch) => ch,
+                    };
+                    c.put_c((ci - self.left) as i32, i as i32, ch, th.sel());
+                }
+            }
         }
         let y = self.size.1 as i32 - 1;
         if let Some(p) = &self.prompt {
@@ -158,8 +243,21 @@ impl App for Notepad {
         }
         self.status = None;
         let rows = self.text_rows();
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let moving = matches!(k.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown);
+        if moving && shift {
+            self.anchor.get_or_insert((self.cy, self.cx));
+        } else if moving {
+            self.anchor = None;
+        }
         match k.code {
             KeyCode::Char('s') if ctrl => return self.save(),
+            KeyCode::Char('c') | KeyCode::Insert if ctrl => self.copy(false),
+            KeyCode::Char('x') if ctrl => self.copy(true),
+            KeyCode::Delete if shift => self.copy(true),
+            KeyCode::Char('v') if ctrl => return self.command("paste"),
+            KeyCode::Insert if shift => return self.command("paste"),
+            KeyCode::Char('a') if ctrl => self.select_all(),
             KeyCode::Char('n') if ctrl => return Action::Launch(Launch::Notepad(None)),
             KeyCode::F(5) => {
                 for ch in chrono::Local::now().format("%H:%M %d/%m/%Y").to_string().chars() {
@@ -169,6 +267,8 @@ impl App for Notepad {
             KeyCode::Char(ch) if !ctrl => self.insert(ch),
             KeyCode::Tab => self.insert('\t'),
             KeyCode::Enter => self.insert('\n'),
+            KeyCode::Backspace if self.delete_sel() => {}
+            KeyCode::Delete if self.delete_sel() => {}
             KeyCode::Backspace => {
                 if self.cx > 0 {
                     self.cx -= 1;
@@ -220,14 +320,33 @@ impl App for Notepad {
         Action::None
     }
 
-    fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, _mods: KeyModifiers) -> Action {
+    fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, mods: KeyModifiers) -> Action {
         match kind {
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) if self.prompt.is_none() => {
+            MouseEventKind::Down(MouseButton::Left) if self.prompt.is_none() => {
                 if y >= 0 && (y as usize) < self.text_rows() {
-                    self.cy = self.top + y as usize;
-                    self.cx = self.left + x.max(0) as usize;
+                    let (cy, cx) = self.at(x, y);
+                    let double = self.last_click.is_some_and(|(t, ly, lx)| (ly, lx) == (cy, cx) && t.elapsed().as_millis() < 450);
+                    self.last_click = if double { None } else { Some((Instant::now(), cy, cx)) };
+                    if mods.contains(KeyModifiers::SHIFT) {
+                        self.anchor.get_or_insert((self.cy, self.cx));
+                    } else {
+                        self.anchor = Some((cy, cx));
+                    }
+                    (self.cy, self.cx) = (cy, cx);
+                    if double {
+                        // a double click picks the word under it
+                        let l = &self.lines[cy];
+                        let start = (0..cx).rev().take_while(|&i| wordy(l[i])).last().unwrap_or(cx);
+                        let end = (cx..l.len()).take_while(|&i| wordy(l[i])).last().map(|i| i + 1).unwrap_or(cx);
+                        self.anchor = Some((cy, start));
+                        self.cx = end;
+                    }
                     self.clamp();
                 }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.prompt.is_none() && self.anchor.is_some() => {
+                (self.cy, self.cx) = self.at(x, y);
+                self.clamp();
             }
             MouseEventKind::ScrollUp => {
                 self.top = self.top.saturating_sub(3);
@@ -266,9 +385,21 @@ impl App for Notepad {
                 Item::sep(),
                 Item::new("Exit", Cmd::Sys(Sys::Close)),
             ]),
-            ("Edit", vec![Item::new("Time/Date", Cmd::App("date")).key("F5")]),
+            ("Edit", vec![
+                Item::new("Cut", Cmd::App("cut")).key("Ctrl+X"),
+                Item::new("Copy", Cmd::App("copy")).key("Ctrl+C"),
+                Item::new("Paste", Cmd::App("paste")).key("Ctrl+V"),
+                Item::new("Delete", Cmd::App("del")).key("Del"),
+                Item::sep(),
+                Item::new("Select All", Cmd::App("all")).key("Ctrl+A"),
+                Item::new("Time/Date", Cmd::App("date")).key("F5"),
+            ]),
             ("Help", vec![Item::new("About Notes", Cmd::App("about")).icon(Icon::Info)]),
         ]
+    }
+
+    fn new_tab(&self) -> Option<Launch> {
+        Some(Launch::Notepad(None))
     }
 
     fn command(&mut self, cmd: &str) -> Action {
@@ -284,8 +415,94 @@ impl App for Notepad {
                 Action::None
             }
             "date" => self.key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
-            "about" => Action::Launch(Launch::Msg { title: "About Notes".into(), text: "Notes\nA plain text editor.\n\nCtrl+S save, F5 inserts the time and date.".into() }),
+            "cut" | "copy" => {
+                self.copy(cmd == "cut");
+                self.clamp();
+                Action::None
+            }
+            "paste" => {
+                match clip::paste_text() {
+                    Some(t) => self.paste(&t),
+                    None => self.status = Some("Can't read the clipboard here. Use your terminal's paste key.".into()),
+                }
+                Action::None
+            }
+            "del" => {
+                self.delete_sel();
+                self.clamp();
+                Action::None
+            }
+            "all" => {
+                self.select_all();
+                self.clamp();
+                Action::None
+            }
+            "about" => Action::Launch(Launch::Msg { title: "About Notes".into(), text: "Notes\nA plain text editor.\n\nCtrl+S save, F5 inserts the time and date.\nDrag or Shift+arrows to select, Ctrl+C/X/V to copy, cut and paste.".into() }),
             _ => Action::None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pad(txt: &str) -> Notepad {
+        let mut n = Notepad::new(None);
+        n.paste(txt);
+        n
+    }
+
+    fn text(n: &Notepad) -> String {
+        n.lines.iter().map(|l| l.iter().collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn key(n: &mut Notepad, code: KeyCode, m: KeyModifiers) {
+        n.key(KeyEvent::new(code, m));
+    }
+
+    #[test]
+    fn shift_arrows_select_across_lines() {
+        let mut n = pad("hello\nworld");
+        (n.cy, n.cx) = (0, 3);
+        key(&mut n, KeyCode::Down, KeyModifiers::SHIFT);
+        key(&mut n, KeyCode::Right, KeyModifiers::SHIFT);
+        assert_eq!(n.selected().as_deref(), Some("lo\nworl"));
+        key(&mut n, KeyCode::Char('X'), KeyModifiers::SHIFT);
+        assert_eq!(text(&n), "helXd");
+        assert_eq!((n.cy, n.cx, n.sel()), (0, 4, None));
+    }
+
+    #[test]
+    fn backwards_selection_and_paste_replace() {
+        let mut n = pad("one two three");
+        n.cx = 7;
+        key(&mut n, KeyCode::Home, KeyModifiers::SHIFT);
+        assert_eq!(n.selected().as_deref(), Some("one two"));
+        n.paste("a\nb");
+        assert_eq!(text(&n), "a\nb three");
+        key(&mut n, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        key(&mut n, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(text(&n), "");
+    }
+
+    #[test]
+    fn click_drag_and_double_click() {
+        let mut n = pad("alpha beta_2 gamma");
+        n.mouse(MouseEventKind::Down(MouseButton::Left), 2, 0, KeyModifiers::NONE);
+        n.mouse(MouseEventKind::Drag(MouseButton::Left), 9, 0, KeyModifiers::NONE);
+        assert_eq!(n.selected().as_deref(), Some("pha bet"));
+        // a plain click drops the selection
+        n.mouse(MouseEventKind::Down(MouseButton::Left), 15, 0, KeyModifiers::NONE);
+        assert_eq!(n.selected(), None);
+        n.last_click = None;
+        n.mouse(MouseEventKind::Down(MouseButton::Left), 8, 0, KeyModifiers::NONE);
+        n.mouse(MouseEventKind::Down(MouseButton::Left), 8, 0, KeyModifiers::NONE);
+        assert_eq!(n.selected().as_deref(), Some("beta_2"));
+        // shift+click stretches it
+        n.mouse(MouseEventKind::Down(MouseButton::Left), 18, 0, KeyModifiers::SHIFT);
+        assert_eq!(n.selected().as_deref(), Some("beta_2 gamma"));
+        key(&mut n, KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(text(&n), "alpha ");
     }
 }

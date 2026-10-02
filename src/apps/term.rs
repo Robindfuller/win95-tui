@@ -370,6 +370,16 @@ impl App for TermApp {
         self.icon
     }
 
+    /// The folder the shell is in, from its "user@host:~/dir" title.
+    fn tab_title(&self) -> String {
+        let t = self.parser.lock().unwrap().callbacks().title.clone().unwrap_or_default();
+        let dir = t.rsplit_once(':').map_or(t.as_str(), |(_, d)| d).trim();
+        match dir.trim_end_matches('/').rsplit('/').next() {
+            Some(d) if !d.is_empty() && !self.finished => d.to_string(),
+            _ => self.base.clone(),
+        }
+    }
+
     fn size_hint(&self) -> (u16, u16) {
         (80, 24)
     }
@@ -576,13 +586,17 @@ impl App for TermApp {
                 Action::None
             }
             "paste" => {
-                if let Ok(out) = std::process::Command::new("wl-paste").arg("-n").output() {
-                    self.paste(&String::from_utf8_lossy(&out.stdout));
+                if let Some(t) = crate::clip::paste_text() {
+                    self.paste(&t);
                 }
                 Action::None
             }
             _ => Action::None,
         }
+    }
+
+    fn new_tab(&self) -> Option<super::Launch> {
+        Some(super::Launch::Shell { cmd: None, cwd: Some(self.cwd.clone()), title: "Terminal".into(), icon: Icon::Terminal, keep_open: false })
     }
 
     fn theme_changed(&mut self, th: &Theme) {

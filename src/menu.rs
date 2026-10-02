@@ -10,6 +10,8 @@ pub enum Cmd {
     Desk(&'static str),
     /// take a program you added off the Apps menu
     Forget(String),
+    /// put this icon on the desktop
+    AddIcon(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -74,6 +76,8 @@ pub enum Owner {
     Start,
     Sys(u64),
     Bar(u64, usize),
+    /// a window's right-click menu
+    Ctx(u64),
     Desk,
 }
 
@@ -138,14 +142,10 @@ impl Level {
                 for x in ix..ix + iw {
                     c.put(x, y, "─", st(th.dim, th.face));
                 }
-                if th.lite {
-                    c.put(self.x, y, "├", st(th.dim, th.face));
-                    c.put(self.x + w - 1, y, "┤", st(th.dim, th.face));
-                }
                 continue;
             }
             let on = self.sel == Some(i);
-            let (fg, bg) = if on && th.lite { (th.text, th.inactive) } else if on { (th.on_accent, th.accent) } else if it.enabled { (th.text, th.face) } else { (th.dim, th.face) };
+            let (fg, bg) = if on { (th.on_accent, th.accent) } else if it.enabled { (th.text, th.face) } else { (th.dim, th.face) };
             c.fill(ix, y, iw, 1, st(fg, bg));
             if it.checked {
                 c.put(ix + 1, y, "✓", st(fg, bg));

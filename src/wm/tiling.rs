@@ -22,6 +22,7 @@ pub enum TopHit {
     Menu,
     Ws(usize),
     Clock,
+    Volume,
     Power,
 }
 
@@ -66,6 +67,7 @@ pub fn launch_key(l: &Launch) -> Option<String> {
         Launch::Notepad(_) => "Notes".into(),
         Launch::Explorer(_) => "Files".into(),
         Launch::Mines => "Mines".into(),
+        Launch::Paint(_) => "Paint".into(),
         _ => return None,
     })
 }
@@ -112,7 +114,7 @@ impl Desktop {
                     if w.app.dialog() {
                         (w.x, w.y) = ((sw - w.w) / 2, (sh - w.h) / 2);
                     } else {
-                        w.x = (if self.lite { 20 } else { 14 } + n * 3).min((sw - w.w).max(0));
+                        w.x = (14 + n * 3).min((sw - w.w).max(0));
                         w.y = (1 + n).min((sh - w.h).max(0));
                         n = (n + 1) % 8;
                     }
@@ -359,6 +361,9 @@ impl Desktop {
         }
         let cw = self.top_clock().chars().count() as i32;
         v.push(((self.w - cw) / 2, cw, TopHit::Clock));
+        if let Some((vx, vw)) = self.top_vol() {
+            v.push((vx, vw, TopHit::Volume));
+        }
         v.push((self.w - 3, 3, TopHit::Power));
         v
     }
@@ -376,6 +381,7 @@ impl Desktop {
             TopHit::Menu => self.open_start(),
             TopHit::Ws(n) => self.switch_ws(n),
             TopHit::Clock => self.launch(Launch::Msg { title: "Date".into(), text: chrono::Local::now().format("%A %-d %B %Y\n%H:%M:%S").to_string() }),
+            TopHit::Volume => self.toggle_vol(),
             TopHit::Power => self.launch(Launch::ShutDown),
         }
     }
@@ -403,6 +409,11 @@ impl Desktop {
                 }
                 TopHit::Clock => {
                     c.text(x, 0, &self.top_clock(), base);
+                }
+                TopHit::Volume => {
+                    let muted = self.vol.is_some_and(|v| v.1);
+                    let s = if self.vol_open.is_some() { th.sel() } else if muted { st(th.dim, th.face) } else { base };
+                    c.text(x, 0, &self.vol_label().unwrap_or_default(), s);
                 }
                 TopHit::Power => {
                     c.text(x + 1, 0, "⏻", st(th.text, th.face));
@@ -527,13 +538,8 @@ impl Desktop {
             let (g, col) = item.icon.glyph(th);
             let col = if on { th.accent } else { col };
             if d.big {
-                if let Icon::Custom(rows) = item.icon {
-                    c.pixels(*x, d.y + 1, rows, &pal);
-                } else {
-                    for (j, l) in item.icon.lines().iter().enumerate() {
-                        c.text(*x, d.y + 1 + j as i32, l, st(col, th.face));
-                    }
-                }
+                // the Classic pixel icons, whichever look the desktop is in
+                c.pixels(*x, d.y + 1, item.icon.art(), &pal);
             } else {
                 c.put_c(x + 1, d.y + 1, g, st(col, th.face));
             }

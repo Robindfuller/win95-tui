@@ -1,11 +1,13 @@
 use super::{Action, App, Launch};
-use crate::{draw::{st, Canvas}, icons::Icon, menu::{Cmd, Item, Sys}, theme::{home, Theme}};
+use crate::{clip, draw::{st, Canvas}, icons::Icon, menu::{Cmd, Item, Sys}, theme::{home, Theme}};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::style::Modifier;
 use std::{
+    collections::HashSet,
     fs,
-    io::Read,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::mpsc::{channel, Receiver},
     time::{Instant, SystemTime},
 };
 
@@ -25,6 +27,15 @@ pub struct Explorer {
     size: (u16, u16),
     last_click: Option<(Instant, usize)>,
     error: Option<String>,
+    /// names picked with Space or Ctrl+click, for copying several at once
+    marked: HashSet<String>,
+    /// a line for the status bar, like "Copied 2 items"
+    note: Option<String>,
+    /// a paste still running: its errors arrive here when it's done
+    job: Option<Receiver<Vec<String>>>,
+    /// the folder's modified time when last read, to spot changes made elsewhere
+    seen: Option<SystemTime>,
+    checked: Instant,
 }
 
 fn human(n: u64) -> String {
@@ -32,17 +43,134 @@ fn human(n: u64) -> String {
     if kb < 10_000 { format!("{}KB", kb) } else { format!("{}MB", kb / 1024) }
 }
 
-fn looks_text(p: &Path) -> bool {
-    let mut buf = [0u8; 4096];
-    match fs::File::open(p).and_then(|mut f| f.read(&mut buf)) {
-        Ok(n) => !buf[..n].contains(&0) && fs::metadata(p).map(|m| m.len() < 4_000_000).unwrap_or(false),
-        Err(_) => false,
+fn items(n: usize) -> String {
+    if n == 1 { "1 item".into() } else { format!("{n} items") }
+}
+
+fn uri(p: &Path) -> String {
+    let mut s = String::from("file://");
+    for b in p.as_os_str().as_encoded_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => s.push(*b as char),
+            _ => s.push_str(&format!("%{b:02X}")),
+        }
     }
+    s
+}
+
+fn from_uri(u: &str) -> Option<PathBuf> {
+    let rest = u.strip_prefix("file://")?;
+    let rest = &rest[rest.find('/')?..];
+    let b = rest.as_bytes();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    Some(PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
+}
+
+/// Files on the system clipboard, and whether they were cut rather than
+/// copied. Reads the format Nautilus uses, then a plain list of URIs or paths.
+fn clip_files() -> Option<(bool, Vec<PathBuf>)> {
+    if let Some(txt) = clip::wl_paste(Some("x-special/gnome-copied-files")) {
+        let mut lines = txt.lines();
+        let cut = lines.next()? == "cut";
+        let v: Vec<PathBuf> = lines.filter_map(from_uri).collect();
+        return (!v.is_empty()).then_some((cut, v));
+    }
+    let txt = clip::wl_paste(Some("text/uri-list")).or_else(clip::paste_text)?;
+    paths_in(&txt).map(|v| (false, v))
+}
+
+/// Every line is a file:// URI or an absolute path that exists, or it's just text.
+fn paths_in(txt: &str) -> Option<Vec<PathBuf>> {
+    let mut v = vec![];
+    for l in txt.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let p = if l.starts_with("file://") { from_uri(l)? } else { PathBuf::from(l) };
+        if !p.is_absolute() || !p.exists() {
+            return None;
+        }
+        v.push(p);
+    }
+    (!v.is_empty()).then_some(v)
+}
+
+/// Put files on the system clipboard the way Nautilus does, so it can paste them.
+fn set_clip(cut: bool, paths: &[PathBuf]) -> Result<(), String> {
+    let mut body = String::from(if cut { "cut" } else { "copy" });
+    for p in paths {
+        body.push('\n');
+        body.push_str(&uri(p));
+    }
+    clip::wl_copy(Some("x-special/gnome-copied-files"), &body)
+}
+
+/// `dir/name`, or `name (copy)`, `name (copy 2)` and so on if that's taken.
+fn free_name(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let p = dir.join(name);
+    if fs::symlink_metadata(&p).is_err() {
+        return p;
+    }
+    let n = Path::new(name);
+    let (stem, ext) = match (n.file_stem(), n.extension()) {
+        (Some(s), Some(e)) => (s.to_string_lossy().to_string(), format!(".{}", e.to_string_lossy())),
+        _ => (name.to_string_lossy().to_string(), String::new()),
+    };
+    (1..)
+        .map(|i| dir.join(if i == 1 { format!("{stem} (copy){ext}") } else { format!("{stem} (copy {i}){ext}") }))
+        .find(|p| fs::symlink_metadata(p).is_err())
+        .unwrap()
+}
+
+/// Copy or move each file into `dir`, never over an existing one. Returns what went wrong.
+fn paste_into(dir: &Path, cut: bool, paths: &[PathBuf]) -> Vec<String> {
+    let mut errs = vec![];
+    for src in paths {
+        let Some(name) = src.file_name() else { continue };
+        if cut && src.parent() == Some(dir) {
+            continue;
+        }
+        if src.is_dir() && dir.starts_with(src) {
+            errs.push(format!("{}: can't put a folder inside itself", name.to_string_lossy()));
+            continue;
+        }
+        let to = free_name(dir, name);
+        let out = if cut { Command::new("mv").arg("--").arg(src).arg(&to).output() } else { Command::new("cp").args(["-a", "--"]).arg(src).arg(&to).output() };
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => errs.push(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Err(e) => errs.push(e.to_string()),
+        }
+    }
+    errs
 }
 
 impl Explorer {
     pub fn new(path: PathBuf) -> Explorer {
-        let mut e = Explorer { path, entries: vec![], sel: 0, top: 0, hidden: false, size: (60, 18), last_click: None, error: None };
+        let mut e = Explorer {
+            path,
+            entries: vec![],
+            sel: 0,
+            top: 0,
+            hidden: false,
+            size: (60, 18),
+            last_click: None,
+            error: None,
+            marked: HashSet::new(),
+            note: None,
+            job: None,
+            seen: None,
+            checked: Instant::now(),
+        };
         e.load();
         e
     }
@@ -50,6 +178,7 @@ impl Explorer {
     fn load(&mut self) {
         self.entries.clear();
         self.error = None;
+        self.seen = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
         if self.path.parent().is_some() {
             self.entries.push(Entry { name: "..".into(), dir: true, size: 0, modified: None });
         }
@@ -77,6 +206,64 @@ impl Explorer {
             Err(e) => self.error = Some(e.to_string()),
         }
         self.sel = self.sel.min(self.entries.len().saturating_sub(1));
+        self.marked.retain(|n| self.entries.iter().any(|e| &e.name == n));
+    }
+
+    /// Read the folder again, keeping the same file selected.
+    fn reload(&mut self) {
+        let name = self.entries.get(self.sel).map(|e| e.name.clone());
+        self.load();
+        if let Some(i) = name.and_then(|n| self.entries.iter().position(|e| e.name == n)) {
+            self.sel = i;
+        }
+        self.keep_visible();
+    }
+
+    /// What Copy and Cut work on: the marked files, or else the selected one.
+    fn picked(&self) -> Vec<PathBuf> {
+        if self.marked.is_empty() {
+            self.entries.get(self.sel).filter(|e| e.name != "..").map(|e| vec![self.path.join(&e.name)]).unwrap_or_default()
+        } else {
+            self.entries.iter().filter(|e| self.marked.contains(&e.name)).map(|e| self.path.join(&e.name)).collect()
+        }
+    }
+
+    fn copy(&mut self, cut: bool) -> Action {
+        let v = self.picked();
+        if v.is_empty() {
+            return Action::None;
+        }
+        match set_clip(cut, &v) {
+            Ok(()) => {
+                self.note = Some(format!("{} {}", if cut { "Cut" } else { "Copied" }, items(v.len())));
+                self.marked.clear();
+                Action::None
+            }
+            Err(e) => Action::Launch(Launch::Msg { title: "Copy".into(), text: format!("Couldn't use the clipboard:\n{e}") }),
+        }
+    }
+
+    /// Paste files from the clipboard into this folder. `text` is what the
+    /// terminal pasted, used when the clipboard itself can't be read (over SSH).
+    fn paste_files(&mut self, text: Option<&str>) -> Action {
+        if self.job.is_some() {
+            return Action::None;
+        }
+        let Some((cut, v)) = clip_files().or_else(|| text.and_then(paths_in).map(|v| (false, v))) else {
+            return Action::Launch(Launch::Msg { title: "Paste".into(), text: "There are no files on the clipboard.".into() });
+        };
+        self.note = Some(format!("{} {}...", if cut { "Moving" } else { "Copying" }, items(v.len())));
+        let (tx, rx) = channel();
+        let dir = self.path.clone();
+        std::thread::spawn(move || {
+            let errs = paste_into(&dir, cut, &v);
+            if cut && errs.is_empty() {
+                let _ = Command::new("wl-copy").arg("--clear").stdout(Stdio::null()).stderr(Stdio::null()).status();
+            }
+            let _ = tx.send(errs);
+        });
+        self.job = Some(rx);
+        Action::None
     }
 
     fn go(&mut self, p: PathBuf) {
@@ -85,6 +272,7 @@ impl Explorer {
         self.path = p;
         self.sel = 0;
         self.top = 0;
+        self.marked.clear();
         self.load();
         if up {
             if let Some(n) = from {
@@ -105,16 +293,8 @@ impl Explorer {
         if e.dir {
             self.go(p);
             Action::None
-        } else if looks_text(&p) {
-            Action::Launch(Launch::Notepad(Some(p)))
         } else {
-            let _ = std::process::Command::new("xdg-open")
-                .arg(&p)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-            Action::None
+            Action::Launch(crate::assoc::launch(&p))
         }
     }
 
@@ -141,6 +321,9 @@ impl App for Explorer {
     fn icon(&self) -> Icon {
         if self.path == Path::new("/") { Icon::Computer } else { Icon::Folder }
     }
+    fn tab_title(&self) -> String {
+        if self.path == home() { "Home".into() } else { self.path.file_name().map_or("/".into(), |n| n.to_string_lossy().to_string()) }
+    }
     fn size_hint(&self) -> (u16, u16) {
         (64, 18)
     }
@@ -150,7 +333,7 @@ impl App for Explorer {
         c.fill(0, 0, w, h, st(th.text, th.face));
         let x = c.text(1, 0, "Address", st(th.text, th.face));
         c.field(x + 1, 0, w - x - 2, &self.path.display().to_string(), th);
-        let head = if th.lite { st(th.dim, th.button).add_modifier(Modifier::BOLD) } else { st(th.text, th.button) };
+        let head = st(th.text, th.button);
         c.fill(0, 1, w, 1, head);
         let size_x = w - 25;
         let date_x = w - 16;
@@ -166,10 +349,13 @@ impl App for Explorer {
         }
         for (row, (i, e)) in self.entries.iter().enumerate().skip(self.top).take(self.list_rows()).enumerate() {
             let y = 2 + row as i32;
-            let on = i == self.sel;
+            let on = i == self.sel || self.marked.contains(&e.name);
             let s = if on { th.sel() } else { body };
             if on {
                 c.fill(0, y, w, 1, s);
+            }
+            if i == self.sel && !self.marked.is_empty() {
+                c.text(0, y, ">", s);
             }
             let (g, col) = if e.dir { Icon::Folder.glyph(th) } else { Icon::File.glyph(th) };
             c.put_c(1, y, g, if on { s } else { st(col, th.client) });
@@ -188,7 +374,12 @@ impl App for Explorer {
         let n = self.entries.iter().filter(|e| e.name != "..").count();
         let free = st(th.text, th.face);
         c.fill(0, h - 1, w, 1, free);
-        c.text(1, h - 1, &format!("{} object(s)", n), free);
+        let status = match (&self.note, self.marked.len()) {
+            (Some(t), _) => t.clone(),
+            (None, 0) => format!("{} object(s)", n),
+            (None, m) => format!("{} of {} selected", m, n),
+        };
+        c.text_max(1, h - 1, &status, free, w - 11);
         if let Some(e) = self.entries.get(self.sel).filter(|e| !e.dir) {
             c.text(w - 10, h - 1, &format!("{:>8}", human(e.size)), free);
         }
@@ -197,7 +388,24 @@ impl App for Explorer {
     fn key(&mut self, k: KeyEvent) -> Action {
         let n = self.entries.len();
         let rows = self.list_rows();
+        self.note = None;
+        let (ctrl, shift) = (k.modifiers.contains(KeyModifiers::CONTROL), k.modifiers.contains(KeyModifiers::SHIFT));
         match k.code {
+            KeyCode::Char('c') | KeyCode::Insert if ctrl => return self.copy(false),
+            KeyCode::Char('x') if ctrl => return self.copy(true),
+            KeyCode::Char('v') if ctrl => return self.paste_files(None),
+            KeyCode::Insert if shift => return self.paste_files(None),
+            KeyCode::Char('a') if ctrl => return self.command("all"),
+            KeyCode::Char(_) if ctrl => {}
+            KeyCode::Char(' ') => {
+                if let Some(e) = self.entries.get(self.sel).filter(|e| e.name != "..") {
+                    if !self.marked.remove(&e.name) {
+                        self.marked.insert(e.name.clone());
+                    }
+                }
+                self.sel = (self.sel + 1).min(n.saturating_sub(1));
+            }
+            KeyCode::Esc => self.marked.clear(),
             KeyCode::Up => self.sel = self.sel.saturating_sub(1),
             KeyCode::Down => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
             KeyCode::PageUp => self.sel = self.sel.saturating_sub(rows),
@@ -219,12 +427,22 @@ impl App for Explorer {
         Action::None
     }
 
-    fn mouse(&mut self, kind: MouseEventKind, _x: i32, y: i32, _mods: KeyModifiers) -> Action {
+    fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, mods: KeyModifiers) -> Action {
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                self.note = None;
                 if y >= 2 && y < 2 + self.list_rows() as i32 {
                     let i = self.top + (y - 2) as usize;
+                    if mods.contains(KeyModifiers::CONTROL) && i < self.entries.len() && self.entries[i].name != ".." {
+                        let name = self.entries[i].name.clone();
+                        if !self.marked.remove(&name) {
+                            self.marked.insert(name);
+                        }
+                        self.sel = i;
+                        return Action::None;
+                    }
                     if i < self.entries.len() {
+                        self.marked.clear();
                         let double = self.last_click.is_some_and(|(t, j)| j == i && t.elapsed().as_millis() < 450);
                         self.sel = i;
                         self.last_click = Some((Instant::now(), i));
@@ -235,6 +453,43 @@ impl App for Explorer {
                     }
                 }
             }
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.note = None;
+                let i = self.top + (y - 2).max(0) as usize;
+                let on = y >= 2 && y < 2 + self.list_rows() as i32 && i < self.entries.len() && self.entries[i].name != "..";
+                if on {
+                    if !self.marked.contains(&self.entries[i].name) {
+                        self.marked.clear();
+                    }
+                    self.sel = i;
+                    let dir = self.entries[i].dir;
+                    return Action::Menu(
+                        vec![
+                            Item::new("Open", Cmd::App("open")),
+                            Item::new("Open in New Tab", Cmd::App("opentab")).enabled(dir),
+                            Item::new("Create Shortcut", Cmd::App("shortcut")),
+                            Item::sep(),
+                            Item::new("Cut", Cmd::App("cut")).key("Ctrl+X"),
+                            Item::new("Copy", Cmd::App("copy")).key("Ctrl+C"),
+                        ],
+                        x,
+                        y,
+                    );
+                }
+                return Action::Menu(
+                    vec![
+                        Item::new("Paste", Cmd::App("paste")).key("Ctrl+V"),
+                        Item::sep(),
+                        Item::new("New Text Document", Cmd::App("newtxt")).icon(Icon::Notepad),
+                        Item::new("New Bitmap Image", Cmd::App("newbmp")).icon(Icon::Picture),
+                        Item::new("Terminal Here", Cmd::App("term")).icon(Icon::Terminal),
+                        Item::sep(),
+                        Item::new("Refresh", Cmd::App("refresh")),
+                    ],
+                    x,
+                    y,
+                );
+            }
             MouseEventKind::ScrollUp => self.top = self.top.saturating_sub(3),
             MouseEventKind::ScrollDown => self.top = (self.top + 3).min(self.entries.len().saturating_sub(self.list_rows())),
             _ => {}
@@ -242,9 +497,38 @@ impl App for Explorer {
         Action::None
     }
 
+    fn paste(&mut self, s: &str) {
+        if let Action::Launch(Launch::Msg { text, .. }) = self.paste_files(Some(s)) {
+            self.note = Some(text);
+        }
+    }
+
     fn resize(&mut self, w: u16, h: u16) {
         self.size = (w, h);
         self.keep_visible();
+    }
+
+    fn poll(&mut self) -> (bool, Action) {
+        if let Some(rx) = &self.job {
+            if let Ok(errs) = rx.try_recv() {
+                self.job = None;
+                self.note = None;
+                self.reload();
+                if !errs.is_empty() {
+                    return (true, Action::Launch(Launch::Msg { title: "Paste".into(), text: errs.join("\n") }));
+                }
+                return (true, Action::None);
+            }
+        }
+        // pick up changes made in other windows or other programs
+        if self.checked.elapsed().as_millis() >= 1000 {
+            self.checked = Instant::now();
+            if fs::metadata(&self.path).and_then(|m| m.modified()).ok() != self.seen {
+                self.reload();
+                return (true, Action::None);
+            }
+        }
+        (false, Action::None)
     }
 
     fn menubar(&self) -> Vec<(&'static str, Vec<Item>)> {
@@ -253,8 +537,17 @@ impl App for Explorer {
                 Item::new("Open", Cmd::App("open")).key("Enter"),
                 Item::new("Terminal Here", Cmd::App("term")).icon(Icon::Terminal),
                 Item::new("New Text Document", Cmd::App("newtxt")).icon(Icon::Notepad),
+                Item::new("New Bitmap Image", Cmd::App("newbmp")).icon(Icon::Picture),
+                Item::new("Create Shortcut", Cmd::App("shortcut")),
                 Item::sep(),
                 Item::new("Close", Cmd::Sys(Sys::Close)),
+            ]),
+            ("Edit", vec![
+                Item::new("Cut", Cmd::App("cut")).key("Ctrl+X"),
+                Item::new("Copy", Cmd::App("copy")).key("Ctrl+C"),
+                Item::new("Paste", Cmd::App("paste")).key("Ctrl+V"),
+                Item::sep(),
+                Item::new("Select All", Cmd::App("all")).key("Ctrl+A"),
             ]),
             ("View", vec![
                 Item::new("Hidden Files", Cmd::App("hidden")).checked(self.hidden).key("."),
@@ -268,9 +561,18 @@ impl App for Explorer {
         ]
     }
 
+    fn new_tab(&self) -> Option<Launch> {
+        Some(Launch::Explorer(self.path.clone()))
+    }
+
     fn command(&mut self, cmd: &str) -> Action {
         match cmd {
             "open" => return self.open(),
+            "opentab" => {
+                if let Some(e) = self.entries.get(self.sel).filter(|e| e.dir && e.name != "..") {
+                    return Action::OpenTab(Launch::Explorer(self.path.join(&e.name)));
+                }
+            }
             "term" => return Action::Launch(Launch::Shell { cmd: None, cwd: Some(self.path.clone()), title: "Terminal".into(), icon: Icon::Terminal, keep_open: false }),
             "newtxt" => {
                 let mut i = 1;
@@ -281,11 +583,35 @@ impl App for Explorer {
                 }
                 return Action::Launch(Launch::Notepad(Some(p)));
             }
+            "newbmp" => {
+                let mut i = 1;
+                let mut p = self.path.join("New Bitmap Image.bmp");
+                while p.exists() {
+                    i += 1;
+                    p = self.path.join(format!("New Bitmap Image ({i}).bmp"));
+                }
+                return Action::Launch(Launch::Paint(Some(p)));
+            }
+            "shortcut" => {
+                let names: Vec<String> = if self.marked.is_empty() {
+                    self.entries.get(self.sel).filter(|e| e.name != "..").map(|e| vec![e.name.clone()]).unwrap_or_default()
+                } else {
+                    self.marked.iter().cloned().collect()
+                };
+                if !names.is_empty() {
+                    self.note = Some(if names.len() == 1 { "Shortcut on the desktop".into() } else { format!("{} shortcuts on the desktop", names.len()) });
+                    return Action::Shortcut(names.iter().map(|n| self.path.join(n)).collect());
+                }
+            }
             "hidden" => {
                 self.hidden = !self.hidden;
                 self.load();
             }
-            "refresh" => self.load(),
+            "cut" => return self.copy(true),
+            "copy" => return self.copy(false),
+            "paste" => return self.paste_files(None),
+            "all" => self.marked = self.entries.iter().filter(|e| e.name != "..").map(|e| e.name.clone()).collect(),
+            "refresh" => self.reload(),
             "up" => {
                 if let Some(p) = self.path.parent() {
                     self.go(p.to_path_buf());
@@ -296,5 +622,46 @@ impl App for Explorer {
             _ => {}
         }
         Action::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uris_round_trip() {
+        let p = PathBuf::from("/home/me/My Files/50% off & ünïcode.txt");
+        assert_eq!(uri(&p), "file:///home/me/My%20Files/50%25%20off%20%26%20%C3%BCn%C3%AFcode.txt");
+        assert_eq!(from_uri(&uri(&p)), Some(p));
+        assert_eq!(from_uri("file://localhost/tmp/a"), Some(PathBuf::from("/tmp/a")));
+    }
+
+    #[test]
+    fn paste_never_overwrites() {
+        let root = std::env::temp_dir().join(format!("win95-paste-{}", std::process::id()));
+        let (a, b) = (root.join("a"), root.join("b"));
+        fs::create_dir_all(a.join("folder")).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("note.txt"), "hi").unwrap();
+        fs::write(a.join("folder/inner"), "x").unwrap();
+
+        let src = [a.join("note.txt"), a.join("folder")];
+        assert!(paste_into(&b, false, &src).is_empty());
+        assert!(paste_into(&b, false, &src).is_empty());
+        assert!(b.join("note.txt").exists() && b.join("note (copy).txt").exists());
+        assert!(b.join("folder/inner").exists() && b.join("folder (copy)/inner").exists());
+
+        // copying into the same folder makes a copy, cutting there does nothing
+        assert!(paste_into(&a, false, &[a.join("note.txt")]).is_empty());
+        assert!(a.join("note (copy).txt").exists());
+        assert!(paste_into(&a, true, &[a.join("note.txt")]).is_empty());
+        assert!(a.join("note.txt").exists());
+
+        assert_eq!(paste_into(&a.join("folder"), false, &[a.join("folder")]).len(), 1);
+
+        assert!(paste_into(&b, true, &[a.join("note.txt")]).is_empty());
+        assert!(!a.join("note.txt").exists() && b.join("note (copy 2).txt").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

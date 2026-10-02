@@ -1,22 +1,64 @@
 # win95-tui
 
-A little desktop that runs in your terminal: line-art desktop icons, a taskbar
+A little desktop that runs in your terminal: pixel-art desktop icons, a taskbar
 with an Apps menu, and overlapping windows you can drag, resize, minimise and
-maximise. No backgrounds by default, just lines in your Omarchy theme colours.
+maximise, all in your Omarchy theme colours.
 
 Apps inside it:
 
 - **Terminal**: a real shell in a window. Anything runs in it (nvim, btop, lazygit, even this).
 - **Notes**, **Mines**, **Files** (file browser).
+
+In Notes, drag, Shift+arrows or Shift+click to select (double-click for a
+word, Ctrl+A for all), and Ctrl+C, Ctrl+X and Ctrl+V to copy, cut and paste.
+Over SSH, copied text goes to your own terminal's clipboard instead, and you
+paste with the terminal's paste key.
+
+In Files, Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste files using the
+desktop clipboard, so they go between Files windows and to or from Nautilus.
+Space or Ctrl+click picks several, Ctrl+A picks them all. A paste never
+overwrites: a clash becomes "name (copy)". This needs wl-clipboard, so it
+doesn't work over SSH.
+- **Paint**: pencil, brush, eraser, fill, line and rectangle with the Windows
+  95 colours; left and right click paint in two colours, Ctrl+Z undoes, and
+  pictures save as .bmp. Each pixel is two cells wide so it comes out square.
 - **Web**: elinks (or lynx, or w3m) in a window, when one is installed.
 - **Run...** opens any command in its own window.
 
 Add your own with Apps > Add Program...: type the command that starts it and
-paint it an icon (click or drag to paint, right-click rubs out). It goes at the
-top of the Apps menu and on the desktop, named after the command, and Apps >
-Programs > Remove Program takes it off. They're kept in
+paint it an icon (click or drag to paint, right-click rubs out). It goes in
+Apps > Programs with a shortcut on the desktop, named after the command, and
+Apps > Programs > Remove Program takes it off. They're kept in
 ~/.config/win95-tui/programs (`name = command` lines) and icons/. A command
 that fails keeps its window open so you can read why.
+
+Terminal, Files and Notes open more in tabs: File > New Tab or Ctrl+Shift+T,
+Ctrl+Shift+W closes one, Ctrl+PgUp/PgDn switch. The tabs show along the top
+once there are two; click × (or middle-click) to close one and + for another.
+Right-click a folder in Files for Open in New Tab.
+
+Files opens folders in Files, .bmp pictures in Paint, text in Notes and
+anything else with the system's own app. Right-click a file for Create
+Shortcut (or File > Create Shortcut) to put it on the desktop, where it opens
+the same way.
+
+Drag desktop icons around; they snap to a grid. Drag a box over the desktop
+to select several (Ctrl+click adds or drops one) and drag them all at once.
+Right-click one (or select them and press Delete) to take them off the desktop; right-click the desktop for Add Icon to put
+any app back, and Arrange Icons to line them up by name or in their current
+order. Where they are is kept in ~/.config/win95-tui/desktop.
+
+Apps > Settings > Background (or right-click the desktop) picks a picture to
+Fill, Fit or Stretch across the desktop, fades it towards a colour, and picks
+that colour: the theme's, Windows teal, greys, the theme's colours or any hex.
+Omarchy uses your current Omarchy wallpaper and follows theme switches, and
+◂ ▸ step through the pictures beside it. Shade behind icons puts a patch of
+the theme's background behind each icon so they stay readable. Changes show as
+you make them; Cancel puts it back.
+
+The speaker in the tray (on the top bar in the Omarchy desktop) opens a volume
+slider with a Mute box; the mouse wheel over it changes the volume too. It
+uses wpctl, so it shows when PipeWire is there.
 
 Drag a window against the far left or right edge to fill that half of the
 screen, into a corner for a quarter, or against the top to maximise. An outline
@@ -26,9 +68,17 @@ Keys: Ctrl+Esc or Alt+S for the Apps menu, Alt+Tab or Alt+` to switch, Alt+F4 to
 close, Alt+Space for the window menu, Ctrl+Alt+Del for the task list,
 Shift+PgUp/PgDn to scroll back in a terminal.
 
-Alt+L switches between the Lite look (default) and a chunkier Classic look with
-filled windows. Also under Apps > Settings, and `--lite` / `--classic` on the
-command line. The choice is saved in ~/.config/win95-tui/settings.
+## Sessions
+
+win95 keeps running in the background, like tmux or herdr. Close the terminal
+and your windows and shells carry on; type `win95` again and you're back where
+you were, at whatever size the new terminal is. Opening it in a second terminal
+moves it there. Apps > Quit offers Detach (leave it running) or Quit (close
+everything), and `win95 stop` quits it from outside. `win95 --here` runs one
+that lives and dies with its terminal, the old way.
+
+After installing a new win95, Quit the running one so the next start picks up
+the new version; it tells you when there's a newer one waiting.
 
 ## Omarchy desktop
 
