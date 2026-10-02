@@ -254,6 +254,10 @@ pub fn serve() -> anyhow::Result<()> {
                     }
                 }
                 In::Msg(g, ToServer::Event(e)) if Some(g) == cur => {
+                    if let Event::Resize(w, h) = e {
+                        // the next draw sees the new size and repaints everything
+                        term.backend_mut().size = Size::new(w, h);
+                    }
                     if let Some(d) = &mut desk {
                         d.event(e);
                         dirty = true;
