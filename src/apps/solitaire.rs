@@ -26,6 +26,10 @@ const RED: Color = Color::Rgb(200, 0, 0);
 const BACK: Color = Color::Rgb(0, 0, 160);
 const BACK_PAT: Color = Color::Rgb(70, 110, 230);
 const POINTER: Color = Color::Rgb(255, 255, 0);
+/// a card the held ones may go on, shown inverted
+const LIT: Color = Color::Rgb(0, 0, 0);
+const LIT_INK: Color = Color::Rgb(255, 255, 255);
+const LIT_RED: Color = Color::Rgb(55, 255, 255);
 
 /// Card size, and the room each pile takes across.
 const CW: i32 = 7;
@@ -139,6 +143,15 @@ struct Bouncer {
 }
 
 #[derive(PartialEq, Clone, Copy)]
+enum Look {
+    Plain,
+    /// held, to be put down somewhere
+    Picked,
+    /// the held cards may go here: inverted, as Windows did
+    Lit,
+}
+
+#[derive(PartialEq, Clone, Copy)]
 enum State {
     Ready,
     Playing,
@@ -159,6 +172,8 @@ pub struct Solitaire {
     /// how far down a tableau column the cursor is, counted up from the top card
     depth: usize,
     kb: bool,
+    /// where the mouse is, for lighting up where held cards could go
+    hover: Option<(i32, i32)>,
     rng: u64,
     size: (u16, u16),
     bounce: Vec<Bouncer>,
@@ -184,6 +199,7 @@ impl Solitaire {
             cur: 0,
             depth: 0,
             kb: false,
+            hover: None,
             rng: seed,
             size: (BOARD_W as u16 + 2, 30),
             bounce: vec![],
@@ -459,13 +475,17 @@ impl Solitaire {
 
     // ------------------------------------------------------------ drawing
 
-    fn draw_card(c: &mut Canvas, x: i32, y: i32, card: Card, picked: bool) {
+    fn draw_card(c: &mut Canvas, x: i32, y: i32, card: Card, look: Look) {
         if !card.up {
             return Self::draw_back(c, x, y);
         }
-        let bg = if picked { PICKED } else { FACE };
-        let line = st(INK, bg);
-        let ink = st(if card.red() { RED } else { INK }, bg);
+        let (bg, fg, red) = match look {
+            Look::Plain => (FACE, INK, RED),
+            Look::Picked => (PICKED, INK, RED),
+            Look::Lit => (LIT, LIT_INK, LIT_RED),
+        };
+        let line = st(fg, bg);
+        let ink = st(if card.red() { red } else { fg }, bg);
         c.fill(x, y, CW, CH, line);
         for xx in x + 1..x + CW - 1 {
             c.put(xx, y, "─", line);
@@ -475,7 +495,7 @@ impl Solitaire {
             c.put(x, yy, "│", line);
             c.put(x + CW - 1, yy, "│", line);
         }
-        Self::corners(c, x, y, INK);
+        Self::corners(c, x, y, fg);
         let l = card.label();
         c.text(x + 1, y, &l, ink.add_modifier(Modifier::BOLD));
         c.text(x + CW - 1 - l.chars().count() as i32, y + CH - 1, &l, ink.add_modifier(Modifier::BOLD));
@@ -516,9 +536,13 @@ impl Solitaire {
         }
     }
 
-    fn draw_slot(c: &mut Canvas, x: i32, y: i32, mark: &str) {
-        c.frame(x, y, CW, CH, st(SLOT, FELT));
-        c.text(x + CW / 2, y + CH / 2, mark, st(SLOT, FELT).add_modifier(Modifier::BOLD));
+    fn draw_slot(c: &mut Canvas, x: i32, y: i32, mark: &str, lit: bool) {
+        let s = if lit { st(LIT_INK, LIT) } else { st(SLOT, FELT) };
+        if lit {
+            c.fill(x, y, CW, CH, s);
+        }
+        c.frame(x, y, CW, CH, s);
+        c.text(x + CW / 2, y + CH / 2, mark, s.add_modifier(Modifier::BOLD));
     }
 
     /// Whether this card is held and should be drawn where the mouse is instead.
@@ -526,18 +550,25 @@ impl Solitaire {
         self.held.is_some_and(|h| h.from == p && i >= h.at && h.grab.is_some() && h.moved)
     }
 
-    fn picked(&self, p: Pile, i: usize) -> bool {
-        self.held.is_some_and(|h| h.from == p && i >= h.at)
+    fn look(&self, p: Pile, i: usize, lit: bool) -> Look {
+        if self.held.is_some_and(|h| h.from == p && i >= h.at) {
+            Look::Picked
+        } else if lit && i + 1 == self.t.pile(p).len() {
+            Look::Lit
+        } else {
+            Look::Plain
+        }
     }
 
     fn draw_pile(&self, c: &mut Canvas, p: Pile) {
         let cards = self.t.pile(p);
         let (x, y) = self.card_pos(p, 0);
+        let lit = self.aim() == Some(p);
         match p {
             Pile::Stock => match cards.last() {
-                Some(&card) => Self::draw_card(c, x, y, card, false),
+                Some(&card) => Self::draw_card(c, x, y, card, Look::Plain),
                 // a circle to deal again, or a cross when that's the end of it
-                None => Self::draw_slot(c, x, y, if self.t.waste.is_empty() { "✕" } else { "○" }),
+                None => Self::draw_slot(c, x, y, if self.t.waste.is_empty() { "✕" } else { "○" }, false),
             },
             Pile::Waste => {
                 let first = cards.len() - self.waste_shown();
@@ -546,7 +577,7 @@ impl Solitaire {
                         continue;
                     }
                     let (cx, cy) = self.card_pos(p, i);
-                    Self::draw_card(c, cx, cy, cards[i], self.picked(p, i));
+                    Self::draw_card(c, cx, cy, cards[i], self.look(p, i, false));
                 }
             }
             Pile::Found(_) => {
@@ -554,20 +585,20 @@ impl Solitaire {
                 // the one beneath shows while the top is dragged away
                 let i = if n > 0 && self.dragging(p, n - 1) { n.checked_sub(2) } else { n.checked_sub(1) };
                 match i {
-                    Some(i) => Self::draw_card(c, x, y, cards[i], self.picked(p, i)),
-                    None => Self::draw_slot(c, x, y, "A"),
+                    Some(i) => Self::draw_card(c, x, y, cards[i], self.look(p, i, lit)),
+                    None => Self::draw_slot(c, x, y, "A", lit),
                 }
             }
             Pile::Tab(_) => {
                 if cards.is_empty() || self.dragging(p, 0) {
-                    Self::draw_slot(c, x, y, "");
+                    Self::draw_slot(c, x, y, "", lit && cards.is_empty());
                 }
                 for (i, &card) in cards.iter().enumerate() {
                     if self.dragging(p, i) {
                         break;
                     }
                     let (cx, cy) = self.card_pos(p, i);
-                    Self::draw_card(c, cx, cy, card, self.picked(p, i));
+                    Self::draw_card(c, cx, cy, card, self.look(p, i, lit));
                 }
             }
         }
@@ -597,7 +628,7 @@ impl Solitaire {
     fn draw_bounce(&mut self) {
         let mut c = Canvas::new(&mut self.trail);
         for b in &self.bounce {
-            Self::draw_card(&mut c, b.x.round() as i32, b.y.round() as i32, b.card, false);
+            Self::draw_card(&mut c, b.x.round() as i32, b.y.round() as i32, b.card, Look::Plain);
         }
     }
 
@@ -695,11 +726,30 @@ impl Solitaire {
             return;
         }
         self.held = None;
-        // aim with the middle of the card's top edge
-        let (cx, cy) = (x - gx + CW / 2, y - gy);
-        if let Some(to) = self.drop_target(cx, cy).or_else(|| self.drop_target(x, y)) {
+        if let Some(to) = self.drag_target(x, y, (gx, gy)) {
             self.try_move(h.from, h.at, to);
         }
+    }
+
+    /// Where dragged cards would land, aiming with the middle of the top card's top edge.
+    fn drag_target(&self, x: i32, y: i32, (gx, gy): (i32, i32)) -> Option<Pile> {
+        self.drop_target(x - gx + CW / 2, y - gy).or_else(|| self.drop_target(x, y))
+    }
+
+    /// The pile the held cards are over, if they're allowed to go there.
+    fn aim(&self) -> Option<Pile> {
+        let h = self.held?;
+        let to = match h.grab {
+            Some(g) if h.moved => self.drag_target(h.pos.0, h.pos.1, g)?,
+            Some(_) => return None,
+            None if self.kb => self.stop_pile(),
+            None => {
+                let (x, y) = self.hover?;
+                self.drop_target(x, y)?
+            }
+        };
+        let n = self.t.pile(h.from).len() - h.at;
+        (to != h.from && self.movable(h.from, h.at) && self.fits(self.t.pile(h.from)[h.at], n, to)).then_some(to)
     }
 
     fn stop_pile(&self) -> Pile {
@@ -753,6 +803,10 @@ impl App for Solitaire {
     fn size_hint(&self) -> (u16, u16) {
         self.hint()
     }
+    // the cards don't grow, so neither does the table
+    fn resizable(&self) -> bool {
+        false
+    }
 
     fn render(&mut self, c: &mut Canvas, th: &Theme, _focused: bool) {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
@@ -776,7 +830,7 @@ impl App for Solitaire {
                 if let (Some((gx, gy)), true) = (hd.grab, hd.moved) {
                     let cards = self.t.pile(hd.from)[hd.at..].to_vec();
                     for (k, card) in cards.into_iter().enumerate() {
-                        Self::draw_card(c, hd.pos.0 - gx, hd.pos.1 - gy + k as i32, card, false);
+                        Self::draw_card(c, hd.pos.0 - gx, hd.pos.1 - gy + k as i32, card, Look::Plain);
                     }
                 }
             }
@@ -852,6 +906,7 @@ impl App for Solitaire {
                 self.kb = false;
                 return self.click(b, x, y);
             }
+            MouseEventKind::Moved => self.hover = Some((x, y)),
             MouseEventKind::Drag(MouseButton::Left) => self.drag(x, y),
             MouseEventKind::Up(MouseButton::Left) => self.release(x, y),
             _ => {}
@@ -973,7 +1028,17 @@ mod tests {
         let (fx, fy) = s.card_pos(Pile::Tab(0), 0);
         let (tx, ty) = s.card_pos(Pile::Tab(1), 1);
         s.mouse(MouseEventKind::Down(MouseButton::Left), fx + 2, fy, KeyModifiers::NONE);
+        // over the empty foundation: nothing lights up
+        let (ax, ay) = s.card_pos(Pile::Found(0), 0);
+        s.mouse(MouseEventKind::Drag(MouseButton::Left), ax + 2, ay, KeyModifiers::NONE);
+        assert_eq!(s.aim(), None);
+        // over the red 10: it does
         s.mouse(MouseEventKind::Drag(MouseButton::Left), tx + 2, ty + 1, KeyModifiers::NONE);
+        assert_eq!(s.aim(), Some(Pile::Tab(1)));
+        let mut buf = Buffer::empty(Rect::new(0, 0, s.size.0, s.size.1));
+        s.render(&mut Canvas::new(&mut buf), &crate::theme::Theme::load(), true);
+        assert_eq!(buf[((tx + 1) as u16, ty as u16)].bg, LIT);
+        assert_eq!(buf[((tx + 1) as u16, ty as u16)].fg, LIT_RED);
         println!("{}", show(&mut s));
         s.mouse(MouseEventKind::Up(MouseButton::Left), tx + 2, ty + 1, KeyModifiers::NONE);
         assert!(s.t.tab[0].is_empty());
