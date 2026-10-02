@@ -51,6 +51,9 @@ fn main() -> anyhow::Result<()> {
     let size = terminal.size()?;
     let mut desk = wm::Desktop::new(size.width, size.height);
     desk.set_tiling(tiling.unwrap_or_else(theme::saved_tiling), false);
+    if std::env::var("WIN95_OPEN").as_deref() == Ok("browser") {
+        desk.launch(apps::Launch::Browser(std::env::var("WIN95_URL").ok()));
+    }
     let res = run(&mut terminal, &mut desk);
     if kb {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);

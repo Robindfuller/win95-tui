@@ -1,6 +1,6 @@
 // Tabs for any window that can open another of itself: Terminal, Files and
 // Notes. A strip of tabs shows along the top once there are two or more.
-use super::{explorer::Explorer, notepad::Notepad, term::TermApp, Action, App, Launch};
+use super::{browser::Browser, explorer::Explorer, notepad::Notepad, term::TermApp, Action, App, Launch};
 use crate::{
     draw::{st, Canvas},
     icons::Icon,
@@ -23,6 +23,7 @@ fn build(l: Launch, th: &Theme) -> Option<Box<dyn App>> {
         Launch::Shell { cmd, cwd, title, icon, keep_open } => Box::new(TermApp::new(cmd.as_deref(), cwd, &title, icon, keep_open, th).ok()?),
         Launch::Notepad(p) => Box::new(Notepad::new(p)),
         Launch::Explorer(p) => Box::new(Explorer::new(p)),
+        Launch::Browser(u) => Box::new(Browser::new(u)),
         _ => return None,
     })
 }

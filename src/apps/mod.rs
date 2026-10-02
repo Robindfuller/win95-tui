@@ -1,5 +1,6 @@
 pub mod amp;
 pub mod background;
+pub mod browser;
 pub mod dialogs;
 pub mod explorer;
 pub mod launcher;
@@ -22,6 +23,8 @@ pub enum Launch {
     /// the music player, with files to add and play
     Amp(Vec<PathBuf>),
     Solitaire,
+    /// the web browser, at this address or its home page
+    Browser(Option<String>),
     Paint(Option<PathBuf>),
     /// a file nothing in here opens, handed to the system (xdg-open)
     External(PathBuf),

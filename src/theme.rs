@@ -115,7 +115,7 @@ fn lum(c: Rgb) -> f32 {
     0.2126 * f(c.0) + 0.7152 * f(c.1) + 0.0722 * f(c.2)
 }
 
-fn contrast(a: Rgb, b: Rgb) -> f32 {
+pub fn contrast(a: Rgb, b: Rgb) -> f32 {
     let (x, y) = (lum(a), lum(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }

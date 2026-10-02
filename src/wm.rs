@@ -10,6 +10,7 @@ use crate::{
         launcher::{rank, Launcher},
         amp::Amp,
         mines::Mines,
+        browser::Browser,
         solitaire::Solitaire,
         notepad::Notepad,
         paint::Paint,
@@ -361,6 +362,7 @@ impl Desktop {
             d(Icon::Mines, "Mines", Launch::Mines),
             d(Icon::Amp, "Amp", Launch::Amp(vec![])),
             d(Icon::Solitaire, "Solitaire", Launch::Solitaire),
+            d(Icon::Browser, "Browser", Launch::Browser(None)),
             d(Icon::Paint, "Paint", Launch::Paint(None)),
         ];
         if has("btop") {
@@ -660,6 +662,7 @@ impl Desktop {
             Launch::Mines => Box::new(Mines::new()),
             Launch::Amp(files) => Box::new(Amp::new(files)),
             Launch::Solitaire => Box::new(Solitaire::new()),
+            Launch::Browser(u) => Box::new(Tabs::new(Box::new(Browser::new(u)), &self.th)),
             Launch::Paint(p) => Box::new(Paint::new(p)),
             Launch::External(p) => {
                 let _ = std::process::Command::new("xdg-open")
@@ -808,6 +811,7 @@ impl Desktop {
             Item::new("Amp", Cmd::Launch(Launch::Amp(vec![]))).icon(Icon::Amp),
             Item::new("Mines", Cmd::Launch(Launch::Mines)).icon(Icon::Mines),
             Item::new("Solitaire", Cmd::Launch(Launch::Solitaire)).icon(Icon::Solitaire),
+            Item::new("Browser", Cmd::Launch(Launch::Browser(None))).icon(Icon::Browser),
             Item::new("Paint", Cmd::Launch(Launch::Paint(None))).icon(Icon::Paint),
         ];
         if has("btop") {
