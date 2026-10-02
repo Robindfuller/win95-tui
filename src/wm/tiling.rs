@@ -447,9 +447,6 @@ impl Desktop {
         if has("btop") {
             v.push(item("Monitor", Icon::Monitor, Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
         }
-        if has("lazygit") {
-            v.push(item("Git", Icon::Git, Launch::shell("Git", Icon::Git, Some("lazygit"))));
-        }
         v.push(item("Amp", Icon::Amp, Launch::Amp(vec![])));
         v.push(item("Mines", Icon::Mines, Launch::Mines));
         v.push(item("Solitaire", Icon::Solitaire, Launch::Solitaire));

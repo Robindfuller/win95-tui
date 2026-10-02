@@ -13,7 +13,6 @@ pub enum Icon {
     Amp,
     Solitaire,
     Monitor,
-    Git,
     Vim,
     Web,
     /// Painted in Add Program: 8 by 6 pixels of palette letters.
@@ -42,7 +41,6 @@ impl Icon {
             Icon::Amp => ('♫', th.green),
             Icon::Solitaire => ('♠', th.text),
             Icon::Monitor => ('▟', th.green),
-            Icon::Git => ('±', th.orange),
             Icon::Vim => ('V', th.green),
             Icon::Web => ('◍', th.cyan),
             Icon::Custom(rows) => ('■', main_colour(rows, th)),
@@ -131,14 +129,6 @@ impl Icon {
                 "..lmlm..",
                 "..llll..",
                 "........",
-            ],
-            Icon::Git => &[
-                "..o.....",
-                "..o..o..",
-                "..o.o...",
-                "..oo....",
-                "..o.....",
-                "..o.....",
             ],
             Icon::Web => &[
                 "..yyyy..",

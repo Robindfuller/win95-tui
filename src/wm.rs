@@ -375,9 +375,6 @@ impl Desktop {
         if let Some(b) = browser() {
             v.push(d(Icon::Web, "Web", Launch::shell("Web", Icon::Web, Some(&b))));
         }
-        if has("lazygit") {
-            v.push(d(Icon::Git, "Git", Launch::shell("Git", Icon::Git, Some("lazygit"))));
-        }
         if has("nvim") {
             v.push(d(Icon::Vim, "Vim", Launch::shell("Vim", Icon::Vim, Some("nvim"))));
         }
@@ -827,9 +824,6 @@ impl Desktop {
         }
         if let Some(b) = browser() {
             progs.push(Item::new("Web", shell("Web", Icon::Web, Some(&b))).icon(Icon::Web));
-        }
-        if has("lazygit") {
-            progs.push(Item::new("Git", shell("Git", Icon::Git, Some("lazygit"))).icon(Icon::Git));
         }
         progs.push(Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal));
         if has("nvim") {
