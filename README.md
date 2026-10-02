@@ -9,9 +9,11 @@ Apps inside it:
 - **Terminal**: a real shell in a window. Anything runs in it (nvim, btop, lazygit, even this).
 - **Notes**, **Mines**, **Files** (file browser).
 - **Solitaire**: classic Klondike on green felt. Drag cards, or click one then
-  click where it goes; double-click sends a card up top, right-click sends
-  everything that can go. Draw one or three, undo, Windows scoring, and the
-  cards bounce off the table when you win.
+  click where it goes; the card you're over turns inverted when the move is
+  allowed. Double-click sends a card up top, right-click sends everything that
+  can go. Draw one or three, undo, Windows scoring, and the cards bounce off
+  the table when you win. Keys: arrows move, Space picks up and puts down,
+  Enter sends a card up top, U undoes, F2 deals again.
 
 In Notes, drag, Shift+arrows or Shift+click to select (double-click for a
 word, Ctrl+A for all), and Ctrl+C, Ctrl+X and Ctrl+V to copy, cut and paste.
@@ -100,7 +102,7 @@ Apps > Settings > Omarchy Desktop swaps the overlapping windows for a tiling
 desktop like Omarchy's own: a bar along the top (Apps menu, workspaces,
 clock, battery, power), windows tiled Hyprland's dwindle way, and a dock that
 slides up when the pointer reaches the bottom edge (it stays up on an empty
-workspace). Dialogs and fixed-size apps like Mines float over the tiles.
+workspace). Dialogs and fixed-size apps like Mines and Solitaire float over the tiles.
 
 Keys use Alt, or Super where your terminal passes it on (Hyprland keeps its
 own Super bindings for itself):
