@@ -15,7 +15,7 @@ use crate::{
     theme::{contrast, mix, Rgb, Theme},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-use ai::Summary;
+use ai::Rebuild;
 use fetch::{Msg, Req};
 use image::{imageops::FilterType, RgbaImage};
 use page::{Block, Page, Span};
@@ -47,12 +47,17 @@ enum K {
     Dim,
     Brand,
     Quote,
+    /// AI-assisted mode's own colours: text, background, bold
+    Ink(Rgb, Rgb, bool),
 }
 
 #[derive(Clone, Debug)]
 enum What {
     Txt { s: String, k: K, link: Option<usize> },
-    Px { pic: Pic, row: u16, cols: u16, rows: u16 },
+    /// `bg` is what see-through bits show, when it isn't the page's
+    Px { pic: Pic, row: u16, cols: u16, rows: u16, bg: Option<Rgb> },
+    /// a run of background colour, under what follows on the line
+    Fill(Rgb),
     Field(usize),
     Btn(usize, usize),
 }
@@ -85,14 +90,14 @@ struct Doc {
     /// the logo's own colour, when the page doesn't name one
     logo_brand: Option<Rgb>,
     scaled: HashMap<(Pic, u16), RgbaImage>,
-    summary: Option<Summary>,
+    rebuilt: Option<Rebuild>,
 }
 
 impl Doc {
     fn new(id: u64, page: Page) -> Doc {
         let values = page.forms.iter().map(|f| f.value.clone()).collect();
         let imgs = vec![None; page.imgs.len()];
-        Doc { id, page, logo: None, imgs, done: false, scroll: 0, values, logo_brand: None, scaled: HashMap::new(), summary: None }
+        Doc { id, page, logo: None, imgs, done: false, scroll: 0, values, logo_brand: None, scaled: HashMap::new(), rebuilt: None }
     }
 
     fn pic(&self, p: Pic) -> Option<&RgbaImage> {
@@ -140,6 +145,8 @@ pub struct Browser {
     laid: Option<(i32, usize, usize, bool)>,
     hits: Vec<(i32, i32, i32, Hit)>,
     brand: Rgb,
+    /// the page's own background, when AI-assisted mode draws it
+    paper: Option<Rgb>,
     drag_bar: bool,
 }
 
@@ -287,6 +294,7 @@ impl Browser {
             laid: None,
             hits: vec![],
             brand: (128, 128, 128),
+            paper: None,
             drag_bar: false,
         };
         let start = url.as_deref().and_then(resolve).or_else(|| Url::parse(HOME).ok());
@@ -312,7 +320,7 @@ impl Browser {
         self.addr = u.to_string();
         self.loading = Some((page::host(&u), into));
         self.focus = Focus::Page;
-        fetch::load(self.agent.clone(), self.ticket, req, self.tx.clone());
+        fetch::load(self.agent.clone(), self.ticket, req, self.ai, self.tx.clone());
     }
 
     fn go(&mut self, s: &str) {
@@ -378,22 +386,31 @@ impl Browser {
         self.sel = None;
         self.hover = None;
         self.laid = None;
-        self.summarise();
+        self.rebuild();
     }
 
-    /// In AI mode, asks Claude about the page on show if nobody has yet.
-    fn summarise(&mut self) {
+    /// In AI mode, asks Claude to redraw the page on show if nobody has yet.
+    fn rebuild(&mut self) {
         if !self.ai {
             return;
         }
         let tx = self.tx.clone();
         let Some(d) = self.doc_mut() else { return };
-        if d.summary.is_some() || !ai::worth(&d.page) {
+        if d.rebuilt.is_some() || !matches!(d.page.url.scheme(), "http" | "https") {
             return;
         }
-        d.summary = Some(Summary::Asking);
-        ai::ask(d.id, ai::text(&d.page), tx);
-        self.laid = None;
+        d.rebuilt = Some(Rebuild::Asking);
+        let p = &mut d.page;
+        let job = ai::Job { doc: d.id, url: p.url.clone(), title: p.title.clone(), links: p.links.clone(), imgs: p.imgs.iter().map(|i| i.0.clone()).collect(), look: p.look.take() };
+        ai::rebuild(job, tx);
+    }
+
+    /// The AI's version of the page on show, if it's on and ready.
+    fn view(&self) -> Option<&ai::View> {
+        match self.doc()?.rebuilt.as_ref()? {
+            Rebuild::Done(v) if self.ai => Some(v),
+            _ => None,
+        }
     }
 
     fn refresh(&mut self) {
@@ -435,35 +452,25 @@ impl Browser {
             return;
         }
         self.laid = Some(key);
+        self.paper = None;
+        if let Some(v) = self.view() {
+            // a redrawn page can be wider: it may have columns
+            let cw = (pw - 2).clamp(10, 140);
+            let mut l = Lay { lines: vec![], x0: (pw - cw) / 2, cw, gap: true, bg: None };
+            ai::Draw { view: v, doc: d, full: (0, pw) }.page(&mut l);
+            while l.lines.last().is_some_and(|x| x.is_empty()) {
+                l.lines.pop();
+            }
+            self.paper = Some(v.bg);
+            self.lines = l.lines;
+            return;
+        }
         let page_brand = d.page.brand.or(d.logo_brand).unwrap_or(rgb(th.accent));
         self.brand = readable(page_brand, rgb(th.client), rgb(th.text));
         let cw = (pw - 4).clamp(10, MAX_W);
         let x0 = (pw - cw) / 2;
-        let mut l = Lay { lines: vec![], x0, cw, gap: true };
+        let mut l = Lay { lines: vec![], x0, cw, gap: true, bg: None };
 
-        if let Some(s) = d.summary.as_ref().filter(|_| self.ai) {
-            l.blank();
-            l.spans(&[("✦ AI summary".into(), K::Bold, None)], 0, 0);
-            let said = match s {
-                Summary::Asking => vec![("Reading the page…".to_string(), K::Dim)],
-                Summary::Done(v) => v.iter().map(|t| (t.clone(), K::Text)).collect(),
-                Summary::Failed(why) => vec![(format!("Couldn't summarise: {why}"), K::Dim)],
-            };
-            for (t, k) in said {
-                let (bullet, rest) = match t.strip_prefix('•') {
-                    Some(r) => ("• ", r.trim_start().to_string()),
-                    None => ("", t),
-                };
-                let mut v = vec![("│ ".to_string(), K::Dim, None)];
-                if !bullet.is_empty() {
-                    v.push((bullet.into(), K::Dim, None));
-                }
-                v.push((rest, k, None));
-                l.spans(&v, 0, 2 + bullet.chars().count() as i32);
-            }
-            l.rule("─", K::Dim);
-            l.gap = false;
-        }
 
         // the site's own banner
         let banner = d.logo.is_some() || !d.page.nav.is_empty();
@@ -566,34 +573,7 @@ impl Browser {
                     }
                 }
                 Block::Rule => l.rule("─", K::Dim),
-                Block::Form(f) => {
-                    let form = &d.page.forms[*f];
-                    let fw = cw.min(60);
-                    let fx = x0 + (cw - fw) / 2;
-                    l.blank();
-                    let label = format!("┌─ {} ", form.label);
-                    let top = format!("{label}{}┐", "─".repeat((fw - label.width() as i32 - 1).max(0) as usize));
-                    l.lines.push(vec![Seg { x: fx, w: fw, what: What::Txt { s: top, k: K::Dim, link: None } }]);
-                    l.lines.push(vec![
-                        Seg { x: fx, w: 1, what: What::Txt { s: "│".into(), k: K::Dim, link: None } },
-                        Seg { x: fx + 2, w: fw - 4, what: What::Field(*f) },
-                        Seg { x: fx + fw - 1, w: 1, what: What::Txt { s: "│".into(), k: K::Dim, link: None } },
-                    ]);
-                    l.lines.push(vec![Seg { x: fx, w: fw, what: What::Txt { s: format!("└{}┘", "─".repeat((fw - 2) as usize)), k: K::Dim, link: None } }]);
-                    let labels: Vec<String> = form.buttons.iter().map(|b| format!("[ {} ]", b.0)).collect();
-                    let total: i32 = labels.iter().map(|s| s.width() as i32).sum::<i32>() + 3 * (labels.len() as i32 - 1);
-                    let mut bx = x0 + (cw - total) / 2;
-                    let mut row = vec![];
-                    for (i, s) in labels.into_iter().enumerate() {
-                        let w = s.width() as i32;
-                        row.push(Seg { x: bx, w, what: What::Btn(*f, i) });
-                        bx += w + 3;
-                    }
-                    l.lines.push(vec![]);
-                    l.lines.push(row);
-                    l.gap = false;
-                    l.blank();
-                }
+                Block::Form(f) => l.form(*f, &d.page.forms[*f], K::Dim),
             }
         }
 
@@ -620,6 +600,10 @@ impl Browser {
             K::Dim => st(th.dim, bg),
             K::Brand => st(col(self.brand), bg).add_modifier(Modifier::BOLD),
             K::Quote => st(th.dim, bg).add_modifier(Modifier::ITALIC),
+            K::Ink(fg, bg, bold) => {
+                let s = st(col(fg), col(bg));
+                if bold { s.add_modifier(Modifier::BOLD) } else { s }
+            }
         }
     }
 
@@ -646,11 +630,11 @@ impl Browser {
 
     fn draw_page(&mut self, c: &mut Canvas, th: &Theme) {
         let (top, ph, pw) = self.page_area();
-        c.fill(0, top, pw, ph, st(th.text, th.client));
+        let bg = self.paper.unwrap_or(rgb(th.client));
+        c.fill(0, top, pw, ph, st(th.text, col(bg)));
         self.hits.clear();
         let scroll = self.scroll();
-        let bg = rgb(th.client);
-        let blend = |p: &image::Rgba<u8>| {
+        let blend = |p: &image::Rgba<u8>, bg: Rgb| {
             let a = p[3] as f32 / 255.0;
             let m = |v: u8, b: u8| (v as f32 * a + b as f32 * (1.0 - a)).round() as u8;
             Color::Rgb(m(p[0], bg.0), m(p[1], bg.1), m(p[2], bg.2))
@@ -664,7 +648,9 @@ impl Browser {
                         let mut style = self.style(k, th);
                         if let Some(li) = link {
                             if !s.is_empty() {
-                                style = style.fg(th.blue);
+                                if !matches!(k, K::Ink(..)) {
+                                    style = style.fg(th.blue);
+                                }
                                 if self.sel == Some(li) {
                                     style = th.sel();
                                 } else if self.hover == Some(li) {
@@ -675,11 +661,13 @@ impl Browser {
                         }
                         c.text_max(seg.x, y, &s, style, pw);
                     }
-                    What::Px { pic, row: r, cols, rows } => {
+                    What::Fill(f) => c.fill(seg.x, y, seg.w.min(pw - seg.x), 1, st(th.text, col(f))),
+                    What::Px { pic, row: r, cols, rows, bg: pbg } => {
+                        let under = pbg.unwrap_or(bg);
                         if let Some(img) = self.scaled(pic, cols, rows, th) {
                             for x in 0..cols as u32 {
                                 let (t, b) = (img.get_pixel(x, r as u32 * 2), img.get_pixel(x, r as u32 * 2 + 1));
-                                c.put(seg.x + x as i32, y, "▀", st(blend(t), blend(b)));
+                                c.put(seg.x + x as i32, y, "▀", st(blend(t, under), blend(b, under)));
                             }
                         }
                     }
@@ -756,6 +744,13 @@ impl Browser {
         if let Some(u) = self.hover.or(self.sel).and_then(|l| self.doc()?.page.links.get(l)) {
             return u.to_string();
         }
+        if self.ai {
+            match self.doc().and_then(|d| d.rebuilt.as_ref()) {
+                Some(Rebuild::Asking) => return "✦ AI is redrawing this page…".into(),
+                Some(Rebuild::Failed(why)) => return format!("✦ AI couldn't redraw this page: {why}"),
+                _ => {}
+            }
+        }
         match self.doc() {
             Some(d) if !d.done => "Fetching pictures…".into(),
             _ => "Done".into(),
@@ -770,6 +765,8 @@ struct Lay {
     cw: i32,
     /// the last line is blank already
     gap: bool,
+    /// the background pictures sit on, when it isn't the page's
+    bg: Option<Rgb>,
 }
 
 type Piece = (String, K, Option<usize>);
@@ -807,9 +804,39 @@ impl Lay {
 
     fn pic(&mut self, pic: Pic, x: i32, cols: u16, rows: u16) {
         for row in 0..rows {
-            self.lines.push(vec![Seg { x, w: cols as i32, what: What::Px { pic, row, cols, rows } }]);
+            self.lines.push(vec![Seg { x, w: cols as i32, what: What::Px { pic, row, cols, rows, bg: self.bg } }]);
         }
         self.gap = false;
+    }
+
+    /// A search box and its buttons; `k` is for the frame.
+    fn form(&mut self, f: usize, form: &page::Form, k: K) {
+        let (x0, cw) = (self.x0, self.cw);
+        let fw = cw.min(60);
+        let fx = x0 + (cw - fw) / 2;
+        self.blank();
+        let label = format!("┌─ {} ", form.label);
+        let top = format!("{label}{}┐", "─".repeat((fw - label.width() as i32 - 1).max(0) as usize));
+        self.lines.push(vec![Seg { x: fx, w: fw, what: What::Txt { s: top, k, link: None } }]);
+        self.lines.push(vec![
+            Seg { x: fx, w: 1, what: What::Txt { s: "│".into(), k, link: None } },
+            Seg { x: fx + 2, w: fw - 4, what: What::Field(f) },
+            Seg { x: fx + fw - 1, w: 1, what: What::Txt { s: "│".into(), k, link: None } },
+        ]);
+        self.lines.push(vec![Seg { x: fx, w: fw, what: What::Txt { s: format!("└{}┘", "─".repeat((fw - 2) as usize)), k, link: None } }]);
+        let labels: Vec<String> = form.buttons.iter().map(|b| format!("[ {} ]", b.0)).collect();
+        let total: i32 = labels.iter().map(|s| s.width() as i32).sum::<i32>() + 3 * (labels.len() as i32 - 1);
+        let mut bx = x0 + (cw - total) / 2;
+        let mut row = vec![];
+        for (i, s) in labels.into_iter().enumerate() {
+            let w = s.width() as i32;
+            row.push(Seg { x: bx, w, what: What::Btn(f, i) });
+            bx += w + 3;
+        }
+        self.lines.push(vec![]);
+        self.lines.push(row);
+        self.gap = false;
+        self.blank();
     }
 
     /// Links in a row with bars between, wrapping as needed.
@@ -940,7 +967,7 @@ impl App for Browser {
                             self.focus = Focus::Form(0);
                         }
                     }
-                    self.summarise();
+                    self.rebuild();
                 }
                 Msg::Logo(g, img) if g == self.ticket => {
                     if let Some(d) = self.doc_mut() {
@@ -955,9 +982,13 @@ impl App for Browser {
                         *slot = Some(img);
                     }
                 }
-                Msg::Summary(id, s) => {
+                Msg::Rebuilt(id, r) => {
                     let Some(d) = self.hist.iter_mut().find(|d| d.id == id) else { continue };
-                    d.summary = Some(s);
+                    if let Rebuild::Done(v) = &r {
+                        // the map can find links the page's own reading didn't
+                        d.page.links = v.links.clone();
+                    }
+                    d.rebuilt = Some(r);
                     self.laid = None;
                 }
                 Msg::Done(g) if g == self.ticket => {
@@ -1306,12 +1337,12 @@ impl App for Browser {
             "ai" => {
                 self.ai = !self.ai;
                 self.laid = None;
-                self.summarise();
+                self.rebuild();
             }
             "help" => {
                 return Action::Launch(Launch::Msg {
                     title: "Browser keys".into(),
-                    text: "Ctrl+L  type an address or a search\nTab     next link, Enter opens it\nAlt+◂ ▸ back and forward (or Backspace)\nF5      refresh, Esc stops\nSpace   page down\n\nMiddle-click a link for a new tab.\nAI-assisted mode puts a short summary\nfrom Claude at the top of each page.".into(),
+                    text: "Ctrl+L  type an address or a search\nTab     next link, Enter opens it\nAlt+◂ ▸ back and forward (or Backspace)\nF5      refresh, Esc stops\nSpace   page down\n\nMiddle-click a link for a new tab.\nAI-assisted mode has Claude redraw each\npage to look like the real thing.".into(),
                 });
             }
             _ => {}
@@ -1334,8 +1365,8 @@ mod tests {
         b.ai = std::env::var("AI").is_ok();
         b.resize(100, 60);
         let t = std::time::Instant::now();
-        let waiting = |b: &Browser| !b.doc().is_some_and(|d| d.done && !matches!(d.summary, Some(Summary::Asking)));
-        while t.elapsed().as_secs() < 45 && waiting(&b) {
+        let waiting = |b: &Browser| !b.doc().is_some_and(|d| d.done && !matches!(d.rebuilt, Some(Rebuild::Asking)));
+        while t.elapsed().as_secs() < 120 && waiting(&b) {
             b.poll();
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -1345,6 +1376,25 @@ mod tests {
         for y in 0..60 {
             let line: String = (0..100).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect();
             println!("{}", line.trim_end());
+        }
+        // DUMP_HTML=file.html also writes it in colour, for a screenshot
+        if let Ok(path) = std::env::var("DUMP_HTML") {
+            let hex = |c: Color| match c {
+                Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                _ => "inherit".into(),
+            };
+            let mut html = String::from("<html><body style='margin:0;background:#000'><pre style='font:14px/1.15 \"JetBrains Mono\",monospace;margin:0'>");
+            for y in 0..60 {
+                for x in 0..100 {
+                    let c = buf.cell((x, y)).unwrap();
+                    let sym = c.symbol().replace('&', "&amp;").replace('<', "&lt;");
+                    let bold = if c.modifier.contains(Modifier::BOLD) { "font-weight:bold;" } else { "" };
+                    html.push_str(&format!("<span style='color:{};background:{};{bold}'>{sym}</span>", hex(c.fg), hex(c.bg)));
+                }
+                html.push('\n');
+            }
+            html.push_str("</pre></body></html>");
+            std::fs::write(path, html).unwrap();
         }
         println!("-- {} lines, {} links, {} pictures, logo {}", b.lines.len(), b.doc().unwrap().page.links.len(), b.doc().unwrap().imgs.iter().filter(|i| i.is_some()).count(), b.doc().unwrap().logo.is_some());
     }

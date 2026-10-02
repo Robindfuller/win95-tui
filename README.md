@@ -52,6 +52,11 @@ doesn't work over SSH.
   Backspace for back and forward. Pages open in a hidden Chromium, so most
   sites work, including ones behind a Cloudflare check; without Chromium it
   fetches pages plainly and fewer sites let it in. Searches go to Brave.
+  View > AI-assisted mode (or the ✦ chip) has Claude redraw each page to look
+  like the real thing: its header strip and colours, menus, columns, cards
+  and boxes, in the site's own colours. It shows the plain page first and
+  swaps in about 15 seconds later. It uses `claude -p`, so it needs Claude
+  Code signed in.
 - **Doom**: the real Doom, in chunky half-block pixels. It's played by
   tui-doom, a separate program kept apart because Doom's code is
   GPL; install that and Doom turns up in Apps > Programs. Arrows move, Ctrl or

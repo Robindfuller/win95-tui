@@ -1,7 +1,8 @@
 // A hidden Chromium that opens pages for us, so sites that turn away simple
 // fetchers or build themselves with JavaScript still come through. One stays
 // running, spoken to over a pipe (the DevTools protocol), and we only ever
-// take the finished page's HTML from it.
+// take the finished page's HTML from it (and, for AI-assisted mode, a picture
+// of it and a map of where everything sits).
 use serde_json::{json, Value};
 use std::{
     fs::File,
@@ -22,6 +23,16 @@ struct Chrome {
     from: Receiver<Value>,
     id: u64,
 }
+
+/// What a page looks like: a JPEG of its top part, base64, and look.js's map.
+#[derive(Clone, Debug)]
+pub struct Look {
+    pub shot: String,
+    pub map: String,
+}
+
+/// how wide the page is laid out when we look at it, as on a laptop
+const LOOK_W: u32 = 1280;
 
 static CHROME: Mutex<Option<Chrome>> = Mutex::new(None);
 
@@ -146,20 +157,23 @@ impl Chrome {
     }
 
     /// Opens a page in a fresh tab and returns where it ended up and its HTML.
-    fn open(&mut self, url: &Url) -> Option<(Url, String)> {
+    fn open(&mut self, url: &Url, look: bool) -> Option<(Url, String, Option<Look>)> {
         let until = Instant::now() + Duration::from_secs(25);
         let mut ev = vec![];
         let target = self.call("Target.createTarget", json!({ "url": "about:blank" }), None, until, &mut ev)?["targetId"].as_str()?.to_string();
-        let got = self.load(&target, url, until);
+        let got = self.load(&target, url, until, look);
         let _ = self.send("Target.closeTarget", json!({ "targetId": target }), None);
         got
     }
 
-    fn load(&mut self, target: &str, url: &Url, until: Instant) -> Option<(Url, String)> {
+    fn load(&mut self, target: &str, url: &Url, until: Instant, look: bool) -> Option<(Url, String, Option<Look>)> {
         let mut ev = vec![];
         let session = self.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None, until, &mut ev)?["sessionId"].as_str()?.to_string();
         let s = Some(session.as_str());
         self.call("Page.enable", json!({}), s, until, &mut ev)?;
+        if look {
+            self.call("Emulation.setDeviceMetricsOverride", json!({ "width": LOOK_W, "height": 900, "deviceScaleFactor": 1, "mobile": false }), s, until, &mut ev)?;
+        }
         ev.clear();
         let nav = self.call("Page.navigate", json!({ "url": url.as_str() }), s, until, &mut ev)?;
         if nav.get("errorText").and_then(Value::as_str).is_some_and(|e| !e.is_empty()) {
@@ -221,17 +235,30 @@ impl Chrome {
         )?;
         let pair: Vec<String> = serde_json::from_str(r["result"]["value"].as_str()?).ok()?;
         let fin = Url::parse(pair.first()?).unwrap_or_else(|_| url.clone());
-        Some((fin, pair.get(1)?.clone()))
+        let look = if look { self.look(s, until) } else { None };
+        Some((fin, pair.get(1)?.clone(), look))
+    }
+
+    fn look(&mut self, s: Option<&str>, until: Instant) -> Option<Look> {
+        let mut ev = vec![];
+        let until = until.max(Instant::now() + Duration::from_secs(8));
+        let r = self.call("Runtime.evaluate", json!({ "expression": include_str!("look.js"), "returnByValue": true }), s, until, &mut ev)?;
+        let map = r["result"]["value"].as_str()?.to_string();
+        let h = serde_json::from_str::<Value>(&map).ok().and_then(|v| v["h"].as_f64()).unwrap_or(900.0).clamp(300.0, 2400.0);
+        let clip = json!({ "x": 0, "y": 0, "width": LOOK_W, "height": h, "scale": 0.6 });
+        let shot = self.call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 60, "clip": clip, "captureBeyondViewport": true }), s, until, &mut ev)?;
+        Some(Look { shot: shot["data"].as_str()?.to_string(), map })
     }
 }
 
 /// Opens a web page with Chromium, when it's installed. One page at a time.
-pub fn get(url: &Url) -> Option<(Url, String)> {
+/// With `look`, it also says what the page looks like.
+pub fn get(url: &Url, look: bool) -> Option<(Url, String, Option<Look>)> {
     let mut slot = CHROME.lock().unwrap_or_else(|e| e.into_inner());
     if !slot.as_mut().is_some_and(|c| c.alive()) {
         *slot = Chrome::start();
     }
-    let got = slot.as_mut()?.open(url);
+    let got = slot.as_mut()?.open(url, look);
     if got.is_none() {
         // it may have wedged: start afresh next time
         if let Some(mut c) = slot.take() {
@@ -248,8 +275,8 @@ mod tests {
     #[ignore]
     fn raw() {
         let u = url::Url::parse(&std::env::var("BROWSE").unwrap()).unwrap();
-        match super::get(&u) {
-            Some((fin, html)) => {
+        match super::get(&u, false) {
+            Some((fin, html, _)) => {
                 let title = html.split("<title").nth(1).and_then(|t| t.split('>').nth(1)).and_then(|t| t.split('<').next()).unwrap_or("");
                 println!("final={fin} len={} title={title:?}", html.len());
             }
