@@ -27,6 +27,7 @@ pub enum Icon {
     Paint,
     Picture,
     Doom,
+    MediaPlayer,
 }
 
 impl Icon {
@@ -51,6 +52,7 @@ impl Icon {
             Icon::Paint => ('✎', th.magenta),
             Icon::Doom => ('Ψ', th.red),
             Icon::Picture => ('▨', th.cyan),
+            Icon::MediaPlayer => ('▷', th.cyan),
             Icon::Settings => ('⚙', th.dim),
         }
     }
@@ -161,6 +163,14 @@ impl Icon {
                 "fyygyyyf",
                 "fggggggf",
                 "ffffffff",
+            ],
+            Icon::MediaPlayer => &[
+                "lmlmlmlm",
+                "kkkykkkk",
+                "kkkyykkk",
+                "kkkyykkk",
+                "kkkykkkk",
+                "lmlmlmlm",
             ],
             _ => &[
                 ".aaaaaa.",

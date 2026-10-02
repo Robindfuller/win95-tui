@@ -6,6 +6,7 @@ pub mod doom;
 pub mod explorer;
 pub mod launcher;
 pub mod mines;
+pub mod mplayer;
 pub mod notepad;
 pub mod paint;
 pub mod solitaire;
@@ -25,6 +26,8 @@ pub enum Launch {
     Amp(Vec<PathBuf>),
     Solitaire,
     Doom,
+    /// the video player (a mockup for now)
+    MediaPlayer,
     /// the web browser, at this address or its home page
     Browser(Option<String>),
     Paint(Option<PathBuf>),
