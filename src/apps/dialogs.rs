@@ -98,6 +98,7 @@ pub fn parse_run(s: &str) -> Launch {
         "mines" | "minesweeper" => Launch::Mines,
         "amp" | "winamp" => Launch::Amp(arg.map(|a| vec![expand(a)]).unwrap_or_default()),
         "solitaire" | "sol" | "cards" => Launch::Solitaire,
+        "mplayer" | "media" | "video" => Launch::MediaPlayer,
         "browser" | "internet" => Launch::Browser(None),
         "files" | "explorer" => Launch::Explorer(arg.map(expand).unwrap_or_else(home)),
         "about" => Launch::About,

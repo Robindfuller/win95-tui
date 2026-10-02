@@ -5,6 +5,7 @@ pub mod dialogs;
 pub mod explorer;
 pub mod launcher;
 pub mod mines;
+pub mod mplayer;
 pub mod notepad;
 pub mod paint;
 pub mod solitaire;
@@ -23,6 +24,8 @@ pub enum Launch {
     /// the music player, with files to add and play
     Amp(Vec<PathBuf>),
     Solitaire,
+    /// the video player (a mockup for now)
+    MediaPlayer,
     /// the web browser, at this address or its home page
     Browser(Option<String>),
     Paint(Option<PathBuf>),
