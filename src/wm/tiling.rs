@@ -69,6 +69,7 @@ pub fn launch_key(l: &Launch) -> Option<String> {
         Launch::Mines => "Mines".into(),
         Launch::Amp(_) => "Amp".into(),
         Launch::Solitaire => "Solitaire".into(),
+        Launch::Doom => "Doom".into(),
         Launch::Browser(_) => "Browser".into(),
         Launch::Paint(_) => "Paint".into(),
         _ => return None,
@@ -448,6 +449,7 @@ impl Desktop {
         v.push(item("Amp", Icon::Amp, Launch::Amp(vec![])));
         v.push(item("Mines", Icon::Mines, Launch::Mines));
         v.push(item("Solitaire", Icon::Solitaire, Launch::Solitaire));
+        v.push(item("Doom", Icon::Doom, Launch::Doom));
         for (name, cmd, icon) in &self.mine {
             v.push(item(name, *icon, Launch::shell(name, *icon, Some(cmd))));
         }

@@ -45,6 +45,12 @@ doesn't work over SSH.
   Backspace for back and forward. Pages open in a hidden Chromium, so most
   sites work, including ones behind a Cloudflare check; without Chromium it
   fetches pages plainly and fewer sites let it in. Searches go to Brave.
+- **Doom**: the real Doom, in chunky half-block pixels. It's played by
+  tui-doom, a separate program kept apart because Doom's code is
+  GPL; install that and Doom turns up in Apps > Programs. Arrows move, Ctrl or
+  left click fires, Space or right click opens doors, Shift runs, Esc is the
+  menu. Keys work best in a terminal with the kitty keyboard protocol (Ghostty,
+  Kitty, Alacritty, foot), which tells it when a key is let go.
 - **Run...** opens any command in its own window.
 
 Add your own with Apps > Add Program...: type the command that starts it and

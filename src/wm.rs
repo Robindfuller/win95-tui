@@ -221,6 +221,8 @@ pub struct Desktop {
     desk_click: (i32, i32),
     last_click: Option<(Instant, i32, i32)>,
     kbmode: Option<(u64, bool)>,
+    /// the window the terminal is sending key releases for
+    key_releases: Option<u64>,
     pub quit: bool,
     /// the session server should let go of this terminal
     pub detach: bool,
@@ -297,6 +299,7 @@ impl Desktop {
             desk_click: (0, 0),
             last_click: None,
             kbmode: None,
+            key_releases: None,
             quit: false,
             detach: false,
             pointer: theme::saved_pointer(),
@@ -362,6 +365,7 @@ impl Desktop {
             d(Icon::Mines, "Mines", Launch::Mines),
             d(Icon::Amp, "Amp", Launch::Amp(vec![])),
             d(Icon::Solitaire, "Solitaire", Launch::Solitaire),
+            d(Icon::Doom, "Doom", Launch::Doom),
             d(Icon::Browser, "Browser", Launch::Browser(None)),
             d(Icon::Paint, "Paint", Launch::Paint(None)),
         ];
@@ -659,6 +663,7 @@ impl Desktop {
             Launch::Mines => Box::new(Mines::new()),
             Launch::Amp(files) => Box::new(Amp::new(files)),
             Launch::Solitaire => Box::new(Solitaire::new()),
+            Launch::Doom => Box::new(crate::apps::doom::Doom::new()),
             Launch::Browser(u) => Box::new(Tabs::new(Box::new(Browser::new(u)), &self.th)),
             Launch::Paint(p) => Box::new(Paint::new(p)),
             Launch::External(p) => {
@@ -808,6 +813,7 @@ impl Desktop {
             Item::new("Amp", Cmd::Launch(Launch::Amp(vec![]))).icon(Icon::Amp),
             Item::new("Mines", Cmd::Launch(Launch::Mines)).icon(Icon::Mines),
             Item::new("Solitaire", Cmd::Launch(Launch::Solitaire)).icon(Icon::Solitaire),
+            Item::new("Doom", Cmd::Launch(Launch::Doom)).icon(Icon::Doom),
             Item::new("Browser", Cmd::Launch(Launch::Browser(None))).icon(Icon::Browser),
             Item::new("Paint", Cmd::Launch(Launch::Paint(None))).icon(Icon::Paint),
         ];
@@ -1176,6 +1182,14 @@ impl Desktop {
     pub fn event(&mut self, ev: Event) {
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
+            Event::Key(k) => {
+                if let Some(id) = self.key_releases {
+                    if let Some(w) = self.win(id) {
+                        let a = w.app.key(k);
+                        self.apply(id, a);
+                    }
+                }
+            }
             Event::Mouse(m) => self.mouse(m),
             Event::Paste(s) => {
                 if let Some(id) = self.focus {
@@ -1805,6 +1819,7 @@ impl Desktop {
             dirty = true;
         }
         dirty |= self.tick_vol();
+        self.tick_key_releases();
         let c = clock();
         if c != self.clock {
             self.clock = c;
@@ -1819,6 +1834,32 @@ impl Desktop {
             }
         }
         dirty
+    }
+
+    /// Asks the terminal for key releases (kitty keyboard protocol: release
+    /// events, every key as a code) while a window that wants them has the
+    /// focus, and puts it back after.
+    fn tick_key_releases(&mut self) {
+        let want = self.focus.filter(|&id| self.wins.iter().any(|w| w.id == id && w.app.key_releases()));
+        if want == self.key_releases {
+            return;
+        }
+        if let Some(w) = self.key_releases.and_then(|id| self.win(id)) {
+            w.app.focus_lost();
+        }
+        match (self.key_releases.is_some(), want.is_some()) {
+            (false, true) => crate::session::raw(b"\x1b[>11u"),
+            (true, false) => crate::session::raw(b"\x1b[<u"),
+            _ => {}
+        }
+        self.key_releases = want;
+    }
+
+    /// A new terminal attached: it starts without key releases on.
+    pub fn terminal_changed(&mut self) {
+        if let Some(w) = self.key_releases.take().and_then(|id| self.win(id)) {
+            w.app.focus_lost();
+        }
     }
 
     // ------------------------------------------------------------ drawing

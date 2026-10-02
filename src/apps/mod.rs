@@ -2,6 +2,7 @@ pub mod amp;
 pub mod background;
 pub mod browser;
 pub mod dialogs;
+pub mod doom;
 pub mod explorer;
 pub mod launcher;
 pub mod mines;
@@ -23,6 +24,7 @@ pub enum Launch {
     /// the music player, with files to add and play
     Amp(Vec<PathBuf>),
     Solitaire,
+    Doom,
     /// the web browser, at this address or its home page
     Browser(Option<String>),
     Paint(Option<PathBuf>),
@@ -113,4 +115,10 @@ pub trait App {
     }
     /// More files for a window that's already open, like the music player.
     fn open_more(&mut self, _files: &[PathBuf]) {}
+    /// Wants key release events (and lone Ctrl, Shift and Alt) while focused.
+    fn key_releases(&self) -> bool {
+        false
+    }
+    /// It had key releases on and lost the focus, so keys held may never be let go.
+    fn focus_lost(&mut self) {}
 }

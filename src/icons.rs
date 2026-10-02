@@ -26,6 +26,7 @@ pub enum Icon {
     Documents,
     Paint,
     Picture,
+    Doom,
 }
 
 impl Icon {
@@ -48,6 +49,7 @@ impl Icon {
             Icon::Info => ('i', th.accent),
             Icon::Shutdown => ('⏻', th.red),
             Icon::Paint => ('✎', th.magenta),
+            Icon::Doom => ('Ψ', th.red),
             Icon::Picture => ('▨', th.cyan),
             Icon::Settings => ('⚙', th.dim),
         }
@@ -95,6 +97,14 @@ impl Icon {
                 ".lflll..",
                 ".lllll..",
                 "..lll...",
+            ],
+            Icon::Doom => &[
+                "n......n",
+                ".nrrrrn.",
+                ".rorror.",
+                ".rrrrrr.",
+                ".rkkkkr.",
+                "..rrrr..",
             ],
             Icon::Solitaire => &[
                 "bbbbb...",

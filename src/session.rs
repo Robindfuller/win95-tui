@@ -35,6 +35,18 @@ pub static SERVER: AtomicBool = AtomicBool::new(false);
 /// Escape codes meant for the client's own terminal (the clipboard over SSH).
 pub static OUTBOX: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
+/// Sends escape codes to the terminal: in a session, to whichever one is
+/// attached.
+pub fn raw(b: &[u8]) {
+    if SERVER.load(Ordering::Relaxed) {
+        OUTBOX.lock().unwrap().extend_from_slice(b);
+        return;
+    }
+    let mut out = io::stdout();
+    let _ = out.write_all(b);
+    let _ = out.flush();
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 enum ToServer {
     /// a client attaching: its size, the desktop it asked for, and when its
@@ -239,6 +251,7 @@ pub fn serve() -> anyhow::Result<()> {
                             d
                         });
                         d.event(Event::Resize(w, h));
+                        d.terminal_changed();
                         if let Some(t) = tiling {
                             d.set_tiling(t, false);
                         }

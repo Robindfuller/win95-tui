@@ -44,14 +44,7 @@ pub fn copy_text(s: &str) {
         return;
     }
     let osc = format!("\x1b]52;c;{}\x07", base64(s.as_bytes()));
-    // in a session it goes to whichever terminal is attached
-    if crate::session::SERVER.load(std::sync::atomic::Ordering::Relaxed) {
-        crate::session::OUTBOX.lock().unwrap().extend_from_slice(osc.as_bytes());
-        return;
-    }
-    let mut out = std::io::stdout();
-    let _ = write!(out, "{osc}");
-    let _ = out.flush();
+    crate::session::raw(osc.as_bytes());
 }
 
 pub fn paste_text() -> Option<String> {
