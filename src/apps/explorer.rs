@@ -36,6 +36,11 @@ pub struct Explorer {
     /// the folder's modified time when last read, to spot changes made elsewhere
     seen: Option<SystemTime>,
     checked: Instant,
+    /// opened by another window's File > Open: the window, and whether it wants a folder
+    pick: Option<(u64, bool)>,
+    /// renaming the selected file: the name so far, the cursor, and whether
+    /// the part before the extension is still selected, ready to type over
+    rename: Option<(Vec<char>, usize, bool)>,
 }
 
 fn human(n: u64) -> String {
@@ -170,9 +175,31 @@ impl Explorer {
             job: None,
             seen: None,
             checked: Instant::now(),
+            pick: None,
+            rename: None,
         };
         e.load();
         e
+    }
+
+    /// A window for picking a file, or a folder, that goes back to window `to`.
+    pub fn picker(path: PathBuf, to: u64, folder: bool) -> Explorer {
+        let mut e = Explorer::new(home());
+        e.pick = Some((to, folder));
+        e.go(if path.is_dir() { path } else { home() });
+        e
+    }
+
+    fn picking_folder(&self) -> bool {
+        self.pick.is_some_and(|(_, f)| f)
+    }
+
+    /// Hand a path back to the window that asked, and close.
+    fn hand_back(&self, p: PathBuf) -> Action {
+        match self.pick {
+            Some((to, _)) => Action::Many(vec![Action::Close, Action::Picked(to, p)]),
+            None => Action::None,
+        }
     }
 
     fn load(&mut self) {
@@ -192,6 +219,10 @@ impl Explorer {
                             return None;
                         }
                         let md = fs::metadata(d.path()).ok();
+                        // picking a folder shows only folders
+                        if self.picking_folder() && !md.as_ref().is_some_and(|m| m.is_dir()) {
+                            return None;
+                        }
                         Some(Entry {
                             dir: md.as_ref().map(|m| m.is_dir()).unwrap_or(false),
                             size: md.as_ref().map(|m| m.len()).unwrap_or(0),
@@ -293,9 +324,102 @@ impl Explorer {
         if e.dir {
             self.go(p);
             Action::None
+        } else if self.pick.is_some() {
+            self.hand_back(p)
         } else {
             Action::Launch(crate::assoc::launch(&p))
         }
+    }
+
+    fn start_rename(&mut self) {
+        if self.pick.is_some() {
+            return;
+        }
+        if let Some(e) = self.entries.get(self.sel).filter(|e| e.name != "..") {
+            let name: Vec<char> = e.name.chars().collect();
+            // like Windows, the name without its extension is ready to type over
+            let stem = match name.iter().rposition(|&c| c == '.') {
+                Some(i) if i > 0 && !e.dir => i,
+                _ => name.len(),
+            };
+            self.marked.clear();
+            self.rename = Some((name, stem, true));
+        }
+    }
+
+    /// Rename the selected file to what was typed. Returns a message if it can't.
+    fn finish_rename(&mut self) -> Action {
+        let Some((name, _, _)) = self.rename.take() else { return Action::None };
+        let Some(old) = self.entries.get(self.sel).map(|e| e.name.clone()) else { return Action::None };
+        let new: String = name.into_iter().collect::<String>().trim().to_string();
+        if new.is_empty() || new == old {
+            return Action::None;
+        }
+        let why = if new.contains('/') || new == "." || new == ".." {
+            Some(format!("A name can't be {new:?} or have a / in it."))
+        } else if fs::symlink_metadata(self.path.join(&new)).is_ok() && !new.eq_ignore_ascii_case(&old) {
+            Some(format!("There's already something called {new} here."))
+        } else {
+            fs::rename(self.path.join(&old), self.path.join(&new)).err().map(|e| format!("Couldn't rename {old}:
+{e}"))
+        };
+        if let Some(text) = why {
+            return Action::Launch(Launch::Msg { title: "Rename".into(), text });
+        }
+        self.load();
+        if let Some(i) = self.entries.iter().position(|e| e.name == new) {
+            self.sel = i;
+        }
+        self.keep_visible();
+        Action::None
+    }
+
+    /// Typing into the name being changed.
+    fn rename_key(&mut self, k: KeyEvent) -> Action {
+        let Some((name, cur, fresh)) = &mut self.rename else { return Action::None };
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // typing or deleting while the old name is still selected replaces it
+        let wipe = |name: &mut Vec<char>, cur: &mut usize| {
+            name.drain(..*cur);
+            *cur = 0;
+        };
+        match k.code {
+            KeyCode::Enter => return self.finish_rename(),
+            KeyCode::Esc => self.rename = None,
+            KeyCode::Char(ch) if !ctrl => {
+                if *fresh {
+                    wipe(name, cur);
+                }
+                name.insert(*cur, ch);
+                *cur += 1;
+            }
+            KeyCode::Backspace | KeyCode::Delete if *fresh => wipe(name, cur),
+            KeyCode::Backspace if *cur > 0 => {
+                *cur -= 1;
+                name.remove(*cur);
+            }
+            KeyCode::Delete if *cur < name.len() => {
+                name.remove(*cur);
+            }
+            KeyCode::Left => *cur = cur.saturating_sub(1),
+            KeyCode::Right => *cur = (*cur + 1).min(name.len()),
+            KeyCode::Home => *cur = 0,
+            KeyCode::End => *cur = name.len(),
+            _ => return Action::None,
+        }
+        if let Some((_, _, fresh)) = &mut self.rename {
+            *fresh = false;
+        }
+        Action::None
+    }
+
+    /// Where the rename box goes: its x and width, and the first character shown.
+    fn rename_box(&self) -> (i32, i32, usize) {
+        let w = self.size.0 as i32;
+        let bw = (if w > 40 { w - 26 } else { w - 1 }) - 2;
+        let room = (bw - 2).max(1) as usize;
+        let cur = self.rename.as_ref().map_or(0, |r| r.1);
+        (2, bw, cur.saturating_sub(room))
     }
 
     fn list_rows(&self) -> usize {
@@ -315,6 +439,9 @@ impl Explorer {
 
 impl App for Explorer {
     fn title(&self) -> String {
+        if let Some((_, folder)) = self.pick {
+            return if folder { "Open Folder".into() } else { "Open".into() };
+        }
         let name = self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or("/".into());
         if self.path == home() { "Home".into() } else if self.path == Path::new("/") { "Computer".into() } else { format!("Files - {}", name) }
     }
@@ -361,6 +488,16 @@ impl App for Explorer {
             c.put_c(1, y, g, if on { s } else { st(col, th.client) });
             let max = if w > 40 { size_x - 1 } else { w };
             c.text_max(3, y, &e.name, if e.dir { s.add_modifier(Modifier::BOLD) } else { s }, max);
+            if i == self.sel {
+                if let Some((name, cur, fresh)) = &self.rename {
+                    let (bx, bw, start) = self.rename_box();
+                    c.field(bx, y, bw, "", th);
+                    let field = st(th.text, th.client);
+                    for (k, ch) in name.iter().enumerate().skip(start).take((bw - 2).max(0) as usize) {
+                        c.put_c(bx + 1 + (k - start) as i32, y, *ch, if *fresh && k < *cur { th.sel() } else { field });
+                    }
+                }
+            }
             if w > 40 && e.name != ".." {
                 if !e.dir {
                     c.text(size_x, y, &format!("{:>7}", human(e.size)), s);
@@ -379,18 +516,36 @@ impl App for Explorer {
             (None, 0) => format!("{} object(s)", n),
             (None, m) => format!("{} of {} selected", m, n),
         };
+        if self.picking_folder() {
+            c.text_max(1, h - 1, &status, free, w - 23);
+            c.button(w - 22, h - 1, 21, "Open This Folder", th, true, false);
+            return;
+        }
         c.text_max(1, h - 1, &status, free, w - 11);
         if let Some(e) = self.entries.get(self.sel).filter(|e| !e.dir) {
             c.text(w - 10, h - 1, &format!("{:>8}", human(e.size)), free);
         }
     }
 
+    fn cursor(&self) -> Option<(u16, u16)> {
+        let (_, cur, fresh) = self.rename.as_ref()?;
+        let row = self.sel.checked_sub(self.top).filter(|r| *r < self.list_rows())?;
+        let (bx, _, start) = self.rename_box();
+        (!fresh).then_some(((bx + 1) as u16 + (cur - start) as u16, 2 + row as u16))
+    }
+
     fn key(&mut self, k: KeyEvent) -> Action {
+        if self.rename.is_some() {
+            return self.rename_key(k);
+        }
         let n = self.entries.len();
         let rows = self.list_rows();
         self.note = None;
         let (ctrl, shift) = (k.modifiers.contains(KeyModifiers::CONTROL), k.modifiers.contains(KeyModifiers::SHIFT));
         match k.code {
+            KeyCode::Char('o') if ctrl && self.picking_folder() => return self.command("pick-here"),
+            KeyCode::Esc if self.pick.is_some() && self.marked.is_empty() => return Action::Close,
+            KeyCode::F(2) => self.start_rename(),
             KeyCode::Char('c') | KeyCode::Insert if ctrl => return self.copy(false),
             KeyCode::Char('x') if ctrl => return self.copy(true),
             KeyCode::Char('v') if ctrl => return self.paste_files(None),
@@ -428,7 +583,21 @@ impl App for Explorer {
     }
 
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, mods: KeyModifiers) -> Action {
+        // clicking anywhere else keeps the name typed, like Windows
+        if matches!(kind, MouseEventKind::Down(_)) && self.rename.is_some() {
+            let on_box = y == 2 + self.sel as i32 - self.top as i32 && matches!(kind, MouseEventKind::Down(MouseButton::Left));
+            if on_box {
+                return Action::None;
+            }
+            let a = self.finish_rename();
+            if !matches!(a, Action::None) {
+                return a;
+            }
+        }
         match kind {
+            MouseEventKind::Down(MouseButton::Left) if self.picking_folder() && y == self.size.1 as i32 - 1 && x >= self.size.0 as i32 - 22 => {
+                return self.command("pick-here");
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.note = None;
                 if y >= 2 && y < 2 + self.list_rows() as i32 {
@@ -471,6 +640,8 @@ impl App for Explorer {
                             Item::sep(),
                             Item::new("Cut", Cmd::App("cut")).key("Ctrl+X"),
                             Item::new("Copy", Cmd::App("copy")).key("Ctrl+C"),
+                            Item::sep(),
+                            Item::new("Rename", Cmd::App("rename")).key("F2").enabled(self.pick.is_none()),
                         ],
                         x,
                         y,
@@ -498,6 +669,18 @@ impl App for Explorer {
     }
 
     fn paste(&mut self, s: &str) {
+        if let Some((name, cur, fresh)) = &mut self.rename {
+            if *fresh {
+                name.drain(..*cur);
+                *cur = 0;
+                *fresh = false;
+            }
+            for ch in s.lines().next().unwrap_or("").chars() {
+                name.insert(*cur, ch);
+                *cur += 1;
+            }
+            return;
+        }
         if let Action::Launch(Launch::Msg { text, .. }) = self.paste_files(Some(s)) {
             self.note = Some(text);
         }
@@ -532,9 +715,26 @@ impl App for Explorer {
     }
 
     fn menubar(&self) -> Vec<(&'static str, Vec<Item>)> {
+        if let Some((_, folder)) = self.pick {
+            let mut file = vec![Item::new("Open", Cmd::App("open")).key("Enter")];
+            if folder {
+                file.push(Item::new("Open This Folder", Cmd::App("pick-here")).key("Ctrl+O"));
+            }
+            file.extend([Item::sep(), Item::new("Cancel", Cmd::Sys(Sys::Close)).key("Esc")]);
+            return vec![
+                ("File", file),
+                ("View", vec![Item::new("Hidden Files", Cmd::App("hidden")).checked(self.hidden).key(".")]),
+                ("Go", vec![
+                    Item::new("Up One Level", Cmd::App("up")).key("Bksp"),
+                    Item::new("Home", Cmd::App("home")).icon(Icon::Folder),
+                    Item::new("Computer", Cmd::App("root")).icon(Icon::Computer),
+                ]),
+            ];
+        }
         vec![
             ("File", vec![
                 Item::new("Open", Cmd::App("open")).key("Enter"),
+                Item::new("Rename", Cmd::App("rename")).key("F2"),
                 Item::new("Terminal Here", Cmd::App("term")).icon(Icon::Terminal),
                 Item::new("New Text Document", Cmd::App("newtxt")).icon(Icon::Notepad),
                 Item::new("New Bitmap Image", Cmd::App("newbmp")).icon(Icon::Picture),
@@ -562,12 +762,14 @@ impl App for Explorer {
     }
 
     fn new_tab(&self) -> Option<Launch> {
-        Some(Launch::Explorer(self.path.clone()))
+        self.pick.is_none().then(|| Launch::Explorer(self.path.clone()))
     }
 
     fn command(&mut self, cmd: &str) -> Action {
         match cmd {
             "open" => return self.open(),
+            "rename" => self.start_rename(),
+            "pick-here" => return self.hand_back(self.path.clone()),
             "opentab" => {
                 if let Some(e) = self.entries.get(self.sel).filter(|e| e.dir && e.name != "..") {
                     return Action::OpenTab(Launch::Explorer(self.path.join(&e.name)));
@@ -635,6 +837,43 @@ mod tests {
         assert_eq!(uri(&p), "file:///home/me/My%20Files/50%25%20off%20%26%20%C3%BCn%C3%AFcode.txt");
         assert_eq!(from_uri(&uri(&p)), Some(p));
         assert_eq!(from_uri("file://localhost/tmp/a"), Some(PathBuf::from("/tmp/a")));
+    }
+
+    #[test]
+    fn f2_renames() {
+        let root = std::env::temp_dir().join(format!("win95-rename-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("notes.txt"), "hi").unwrap();
+        fs::write(root.join("taken.txt"), "x").unwrap();
+        let mut e = Explorer::new(root.clone());
+        let key = |e: &mut Explorer, c: KeyCode| e.key(KeyEvent::new(c, KeyModifiers::NONE));
+        e.sel = e.entries.iter().position(|x| x.name == "notes.txt").unwrap();
+        // typing replaces the name but keeps .txt
+        key(&mut e, KeyCode::F(2));
+        for ch in "plan".chars() {
+            key(&mut e, KeyCode::Char(ch));
+        }
+        key(&mut e, KeyCode::Enter);
+        assert!(root.join("plan.txt").exists() && !root.join("notes.txt").exists());
+        assert_eq!(e.entries[e.sel].name, "plan.txt");
+        // Esc leaves it be
+        key(&mut e, KeyCode::F(2));
+        key(&mut e, KeyCode::Char('z'));
+        key(&mut e, KeyCode::Esc);
+        assert!(root.join("plan.txt").exists());
+        // never over another file
+        key(&mut e, KeyCode::F(2));
+        key(&mut e, KeyCode::End);
+        for _ in 0..8 {
+            key(&mut e, KeyCode::Backspace);
+        }
+        for ch in "taken.txt".chars() {
+            key(&mut e, KeyCode::Char(ch));
+        }
+        assert!(matches!(key(&mut e, KeyCode::Enter), Action::Launch(Launch::Msg { .. })));
+        assert_eq!(fs::read_to_string(root.join("taken.txt")).unwrap(), "x");
+        assert!(root.join("plan.txt").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

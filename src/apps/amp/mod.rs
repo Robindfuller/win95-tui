@@ -1786,8 +1786,9 @@ impl App for Amp {
         self.run(cmd)
     }
 
-    fn open_more(&mut self, files: &[PathBuf]) {
+    fn open_more(&mut self, files: &[PathBuf]) -> Action {
         self.open_files(files);
+        Action::None
     }
 }
 

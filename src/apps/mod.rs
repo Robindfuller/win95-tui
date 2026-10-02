@@ -71,6 +71,11 @@ pub enum Action {
     Refresh,
     /// the desktop background settings changed
     Background,
+    /// ask for a file (or with `folder`, a folder) starting in `dir`, to come
+    /// back to this window through open_more
+    Pick { dir: PathBuf, folder: bool },
+    /// what a picker picked, for the window that asked
+    Picked(u64, PathBuf),
     Many(Vec<Action>),
 }
 
@@ -116,8 +121,20 @@ pub trait App {
     fn new_tab(&self) -> Option<Launch> {
         None
     }
-    /// More files for a window that's already open, like the music player.
-    fn open_more(&mut self, _files: &[PathBuf]) {}
+    /// More files for a window that's already open, like the music player,
+    /// or what a picker it asked for picked.
+    fn open_more(&mut self, _files: &[PathBuf]) -> Action {
+        Action::None
+    }
+    /// The file it has open, so a window with tabs can find a tab already showing it.
+    fn showing(&self) -> Option<PathBuf> {
+        None
+    }
+    /// The folder side bar Notes shares between its tabs.
+    fn tree(&self) -> Option<notepad::SharedTree> {
+        None
+    }
+    fn set_tree(&mut self, _t: notepad::SharedTree) {}
     /// Wants key release events (and lone Ctrl, Shift and Alt) while focused.
     fn key_releases(&self) -> bool {
         false

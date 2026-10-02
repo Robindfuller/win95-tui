@@ -275,6 +275,22 @@ fn col(c: Rgb) -> Color {
 }
 
 impl App for Paint {
+    /// A picture picked with File > Open replaces this one, unless this has
+    /// changes not saved, then it gets a window of its own.
+    fn open_more(&mut self, files: &[PathBuf]) -> Action {
+        let Some(f) = files.first() else { return Action::None };
+        let picture = matches!(crate::assoc::launch(f), Launch::Paint(_)) || image::ImageFormat::from_path(f).is_ok();
+        if !picture {
+            return Action::Launch(crate::assoc::launch(f));
+        }
+        if self.modified {
+            return Action::Launch(Launch::Paint(Some(f.clone())));
+        }
+        let (size, tool, fg, bg) = (self.size, self.tool, self.fg, self.bg);
+        *self = Paint::new(Some(f.clone()));
+        (self.size, self.tool, self.fg, self.bg) = (size, tool, fg, bg);
+        Action::None
+    }
     fn title(&self) -> String {
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or("untitled".into());
         format!("{}{} - Paint", name, if self.modified { "*" } else { "" })
@@ -472,7 +488,7 @@ impl App for Paint {
             "new" => return Action::Launch(Launch::Paint(None)),
             "open" => {
                 let dir = self.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| default_path().parent().unwrap().to_path_buf());
-                return Action::Launch(Launch::Explorer(dir));
+                return Action::Pick { dir, folder: false };
             }
             "save" => return self.save(),
             "saveas" => self.prompt = Some(tidy(&self.path.clone().unwrap_or_else(default_path))),

@@ -210,6 +210,8 @@ pub struct MediaPlayer {
     size: (u16, u16),
     media: Option<Media>,
     error: Option<String>,
+    /// the last file it was asked to play, even one it couldn't
+    tried: Option<PathBuf>,
     pos: f64,
     playing: bool,
     /// where playing started from, and when
@@ -258,6 +260,7 @@ impl MediaPlayer {
             size: (66, 28),
             media: None,
             error: None,
+            tried: None,
             pos: 0.0,
             playing: false,
             from: (0.0, now),
@@ -284,6 +287,7 @@ impl MediaPlayer {
 
     fn load(&mut self, path: &Path) {
         self.halt();
+        self.tried = Some(path.to_path_buf());
         (self.pos, self.sel, self.frame) = (0.0, (None, None), vec![]);
         match probe(path) {
             Ok(m) => {
@@ -389,7 +393,7 @@ impl MediaPlayer {
     }
 
     fn folder(&self) -> PathBuf {
-        if let Some(d) = self.media.as_ref().and_then(|m| m.path.parent()) {
+        if let Some(d) = self.tried.as_ref().and_then(|p| p.parent()) {
             return d.to_path_buf();
         }
         let videos = home().join("Videos");
@@ -434,7 +438,7 @@ impl MediaPlayer {
                 self.halt();
                 (self.media, self.error, self.pos, self.sel, self.frame) = (None, None, 0.0, (None, None), vec![]);
             }
-            "open" => return Action::Launch(Launch::Explorer(self.folder())),
+            "open" => return Action::Pick { dir: self.folder(), folder: false },
             "props" => {
                 let text = self.media.as_ref().map(|m| m.info.clone()).unwrap_or_else(|| "No video open.".into());
                 return Action::Launch(Launch::Msg { title: "Properties".into(), text });
@@ -679,5 +683,15 @@ impl App for MediaPlayer {
 
     fn command(&mut self, cmd: &str) -> Action {
         self.run(cmd)
+    }
+
+    /// A video picked with File > Open plays here; anything else opens in what it belongs to.
+    fn open_more(&mut self, files: &[PathBuf]) -> Action {
+        let Some(f) = files.first() else { return Action::None };
+        if !plays(f) {
+            return Action::Launch(crate::assoc::launch(f));
+        }
+        self.load(f);
+        Action::None
     }
 }

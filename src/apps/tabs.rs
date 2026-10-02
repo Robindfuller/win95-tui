@@ -9,6 +9,7 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::style::Modifier;
+use std::path::PathBuf;
 
 pub struct Tabs {
     tabs: Vec<Box<dyn App>>,
@@ -46,8 +47,18 @@ impl Tabs {
     }
 
     fn open(&mut self, l: Launch) -> Action {
+        // a file that's open already: go to its tab
+        if let Launch::Notepad(Some(p)) = &l {
+            if let Some(i) = self.tabs.iter().position(|t| t.showing().as_ref() == Some(p)) {
+                self.cur = i;
+                return Action::None;
+            }
+        }
         let Some(mut t) = build(l, &self.th) else { return Action::None };
         t.theme_changed(&self.th);
+        if let Some(tree) = self.tabs[self.cur].tree() {
+            t.set_tree(tree);
+        }
         self.tabs.insert(self.cur + 1, t);
         self.cur += 1;
         self.relayout();
@@ -204,6 +215,11 @@ impl App for Tabs {
         match bar.iter_mut().find(|(n, _)| *n == "File") {
             Some((_, items)) => {
                 let at = items.iter().position(|i| i.sep).unwrap_or(items.len());
+                let mut tabs = tabs;
+                // no second line where the menu has one already
+                if at < items.len() {
+                    tabs.pop();
+                }
                 for (k, it) in tabs.into_iter().enumerate() {
                     items.insert(at + k, it);
                 }
@@ -247,5 +263,20 @@ impl App for Tabs {
     }
     fn new_tab(&self) -> Option<Launch> {
         self.tabs[self.cur].new_tab()
+    }
+    fn open_more(&mut self, files: &[PathBuf]) -> Action {
+        let a = self.tabs[self.cur].open_more(files);
+        self.handle(self.cur, a)
+    }
+    fn showing(&self) -> Option<PathBuf> {
+        self.tabs[self.cur].showing()
+    }
+    fn tree(&self) -> Option<super::notepad::SharedTree> {
+        self.tabs[self.cur].tree()
+    }
+    fn set_tree(&mut self, t: super::notepad::SharedTree) {
+        for tab in &mut self.tabs {
+            tab.set_tree(t.clone());
+        }
     }
 }

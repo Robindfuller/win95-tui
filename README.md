@@ -18,9 +18,16 @@ Apps inside it:
 In Notes, drag, Shift+arrows or Shift+click to select (double-click for a
 word, Ctrl+A for all), and Ctrl+C, Ctrl+X and Ctrl+V to copy, cut and paste.
 Over SSH, copied text goes to your own terminal's clipboard instead, and you
-paste with the terminal's paste key.
+paste with the terminal's paste key. File > Open Folder... puts a folder down
+the left, like Sublime Text: click a folder to open it out, a file to open it
+(in a tab of its own unless the one you're on is empty). Ctrl+E moves the keys
+into the list and back. File > Close Folder takes it away again.
 
-In Files, Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste files using the
+File > Open... in Notes, Paint and Media Player opens what you pick in that
+same window.
+
+In Files, F2 (or right-click > Rename) renames a file; typing replaces the
+name but keeps its extension, Esc leaves it as it was.  Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste files using the
 desktop clipboard, so they go between Files windows and to or from Nautilus.
 Space or Ctrl+click picks several, Ctrl+A picks them all. A paste never
 overwrites: a clash becomes "name (copy)". This needs wl-clipboard, so it

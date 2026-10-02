@@ -657,9 +657,10 @@ impl Desktop {
         // there's one music player: more files go to the one that's open
         if let Launch::Amp(files) = &l {
             if let Some(w) = self.wins.iter_mut().find(|w| w.key == "Amp") {
-                w.app.open_more(files);
+                let a = w.app.open_more(files);
                 let id = w.id;
                 self.focus_win(id);
+                self.apply(id, a);
                 return;
             }
         }
@@ -809,6 +810,18 @@ impl Desktop {
             Action::Detach => self.detach = true,
             // a window without tabs opens it on its own
             Action::OpenTab(l) => self.launch(l),
+            Action::Pick { dir, folder } => self.add(Box::new(Explorer::picker(dir, id, folder))),
+            Action::Picked(to, p) => {
+                if let Some(w) = self.wins.iter_mut().find(|w| w.id == to) {
+                    let a = w.app.open_more(std::slice::from_ref(&p));
+                    w.sync();
+                    self.focus_win(to);
+                    self.apply(to, a);
+                } else if !p.is_dir() {
+                    // the window that asked has gone: open it the usual way
+                    self.launch(crate::assoc::launch(&p));
+                }
+            }
             Action::Menu(items, x, y) => {
                 if let Some(w) = self.wins.iter().find(|w| w.id == id) {
                     let (cx, cy, _, _) = w.client();
@@ -2382,6 +2395,48 @@ mod tests {
         d.key(KeyEvent::new(KeyCode::Char('W'), shift_ctrl));
         d.key(KeyEvent::new(KeyCode::Char('W'), shift_ctrl));
         assert!(d.idx(id).is_none());
+    }
+
+    #[test]
+    fn file_open_comes_back_to_the_window_that_asked() {
+        let dir = std::env::temp_dir().join(format!("win95-pick-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        std::fs::write(dir.join("clip.mp4"), "not really a video").unwrap();
+        let mut d = Desktop::new(120, 40);
+        let k = |d: &mut Desktop, code: KeyCode, m: KeyModifiers| d.key(KeyEvent::new(code, m));
+
+        // Notes: File > Open picks b.txt, which opens in a tab of the same window
+        d.launch(Launch::Notepad(Some(dir.join("a.txt"))));
+        let id = d.focus.unwrap();
+        d.exec(Cmd::App("open"), Owner::Bar(id, 0));
+        assert_eq!((d.wins.len(), d.wins.last().unwrap().app.title().as_str()), (2, "Open"));
+        k(&mut d, KeyCode::Char('b'), KeyModifiers::NONE);
+        k(&mut d, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!((d.wins.len(), d.focus), (1, Some(id)));
+        assert_eq!(d.wins[0].app.showing(), Some(dir.join("b.txt")));
+
+        // File > Open Folder shows only folders; Ctrl+O takes the one it's in
+        d.exec(Cmd::App("openfolder"), Owner::Bar(id, 0));
+        assert_eq!(d.wins.last().unwrap().app.title(), "Open Folder");
+        k(&mut d, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!(d.wins.len(), 1);
+        let tree = d.wins[0].app.tree().unwrap();
+        assert_eq!(tree.borrow().root.as_deref(), Some(dir.as_path()));
+
+        // Media Player plays what it picks itself, not in a new window
+        d.launch(Launch::MediaPlayer(Some(dir.join("clip.mp4"))));
+        let mp = d.focus.unwrap();
+        d.exec(Cmd::App("open"), Owner::Bar(mp, 0));
+        k(&mut d, KeyCode::Char('c'), KeyModifiers::NONE);
+        k(&mut d, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!((d.wins.len(), d.focus), (2, Some(mp)));
+        // and Esc in a picker gives up
+        d.exec(Cmd::App("open"), Owner::Bar(mp, 0));
+        k(&mut d, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(d.wins.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

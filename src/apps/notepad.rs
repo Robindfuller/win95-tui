@@ -1,7 +1,117 @@
 use super::{Action, App, Launch};
 use crate::{clip, draw::{st, Canvas}, icons::Icon, menu::{Cmd, Item, Sys}, theme::{home, Theme}};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
-use std::{fs, path::PathBuf, time::Instant};
+use ratatui::style::Modifier;
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Instant,
+};
+
+/// One line of the folder list: a file or folder, how deep it is, and its name.
+struct Row {
+    path: PathBuf,
+    depth: usize,
+    dir: bool,
+    name: String,
+}
+
+/// The folder down the left, like Sublime Text's side bar. Every tab in a
+/// Notes window shares the one, so they all show it and Close Folder shuts it
+/// for all of them.
+#[derive(Default)]
+pub struct Tree {
+    pub(crate) root: Option<PathBuf>,
+    /// folders opened out
+    open: HashSet<PathBuf>,
+    rows: Vec<Row>,
+    sel: usize,
+    top: usize,
+    /// when the folders were last read, to pick up changes made elsewhere
+    read: Option<Instant>,
+    /// goes up whenever the rows change, so each tab knows to redraw
+    version: u64,
+}
+
+pub type SharedTree = Rc<RefCell<Tree>>;
+
+/// Too many rows to be any use, and a folder like / would take ages.
+const MAX_ROWS: usize = 5000;
+
+impl Tree {
+    fn set_root(&mut self, p: PathBuf) {
+        self.open = HashSet::from([p.clone()]);
+        self.root = Some(p);
+        (self.sel, self.top) = (0, 0);
+        self.refresh();
+    }
+
+    fn close(&mut self) {
+        *self = Tree { version: self.version + 1, ..Tree::default() };
+    }
+
+    /// Read the open folders again.
+    fn refresh(&mut self) {
+        self.read = Some(Instant::now());
+        let mut rows = vec![];
+        if let Some(root) = &self.root {
+            let name = root.file_name().map_or(root.display().to_string(), |n| n.to_string_lossy().to_string());
+            rows.push(Row { path: root.clone(), depth: 0, dir: true, name });
+            self.walk(root, 1, &mut rows);
+        }
+        let same = rows.len() == self.rows.len() && rows.iter().zip(&self.rows).all(|(a, b)| a.path == b.path && a.dir == b.dir);
+        if !same {
+            // keep the same file picked if it's still there
+            let was = self.rows.get(self.sel).map(|r| r.path.clone());
+            self.rows = rows;
+            self.sel = was.and_then(|w| self.rows.iter().position(|r| r.path == w)).unwrap_or(self.sel).min(self.rows.len().saturating_sub(1));
+            self.version += 1;
+        }
+    }
+
+    fn walk(&self, dir: &Path, depth: usize, rows: &mut Vec<Row>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        let mut v: Vec<(bool, String, PathBuf)> = rd
+            .flatten()
+            .map(|e| (e.path(), e.file_name().to_string_lossy().to_string()))
+            .filter(|(_, n)| !n.starts_with('.'))
+            .map(|(p, n)| (p.is_dir(), n, p))
+            .collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+        for (dir, name, path) in v {
+            if rows.len() >= MAX_ROWS {
+                return;
+            }
+            let open = dir && self.open.contains(&path);
+            rows.push(Row { path: path.clone(), depth, dir, name });
+            if open {
+                self.walk(&path, depth + 1, rows);
+            }
+        }
+    }
+
+    /// Open a folder out, or fold it away.
+    fn toggle(&mut self, i: usize) {
+        let Some(r) = self.rows.get(i).filter(|r| r.dir && r.depth > 0) else { return };
+        let p = r.path.clone();
+        if !self.open.remove(&p) {
+            self.open.insert(p);
+        }
+        self.refresh();
+    }
+
+    fn keep_visible(&mut self, rows: usize) {
+        if self.sel < self.top {
+            self.top = self.sel;
+        }
+        if self.sel >= self.top + rows {
+            self.top = self.sel + 1 - rows;
+        }
+    }
+}
 
 pub struct Notepad {
     lines: Vec<Vec<char>>,
@@ -17,6 +127,11 @@ pub struct Notepad {
     /// where a selection started (line, column); it runs to the cursor
     anchor: Option<(usize, usize)>,
     last_click: Option<(Instant, usize, usize)>,
+    tree: SharedTree,
+    /// the tree version last drawn
+    drawn: u64,
+    /// keys go to the folder list rather than the text
+    in_tree: bool,
 }
 
 type Span = ((usize, usize), (usize, usize));
@@ -33,24 +148,170 @@ pub fn expand(p: &str) -> PathBuf {
     }
 }
 
+/// A file's lines, and a word for the status bar if it couldn't be read.
+fn read(p: &Path) -> (Vec<Vec<char>>, Option<String>) {
+    match fs::read(p) {
+        Ok(bytes) => {
+            let txt = String::from_utf8_lossy(&bytes);
+            let mut lines: Vec<Vec<char>> = txt.split('\n').map(|l| l.trim_end_matches('\r').chars().collect()).collect();
+            if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) {
+                lines.pop();
+            }
+            (lines, None)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (vec![vec![]], Some("New file".into())),
+        Err(e) => (vec![vec![]], Some(format!("Cannot open: {e}"))),
+    }
+}
+
 impl Notepad {
     pub fn new(path: Option<PathBuf>) -> Notepad {
-        let mut lines = vec![vec![]];
-        let mut status = None;
-        if let Some(p) = &path {
-            match fs::read(p) {
-                Ok(bytes) => {
-                    let txt = String::from_utf8_lossy(&bytes);
-                    lines = txt.split('\n').map(|l| l.trim_end_matches('\r').chars().collect()).collect();
-                    if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) {
-                        lines.pop();
-                    }
+        let (lines, status) = path.as_deref().map(read).unwrap_or((vec![vec![]], None));
+        Notepad {
+            lines,
+            cx: 0,
+            cy: 0,
+            top: 0,
+            left: 0,
+            path,
+            modified: false,
+            size: (60, 18),
+            prompt: None,
+            status,
+            anchor: None,
+            last_click: None,
+            tree: SharedTree::default(),
+            drawn: 0,
+            in_tree: false,
+        }
+    }
+
+    /// The folder File > Open starts in.
+    fn here(&self) -> PathBuf {
+        self.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(home)
+    }
+
+    /// Nothing typed and no file: a file opened from here can just replace it.
+    fn blank(&self) -> bool {
+        self.path.is_none() && !self.modified && self.lines.len() == 1 && self.lines[0].is_empty()
+    }
+
+    /// Open a file from the folder list or File > Open: here if this tab is
+    /// empty, else in a tab of its own, and things that aren't text in
+    /// whatever they belong to.
+    fn open_file(&mut self, p: &Path) -> Action {
+        if self.path.as_deref() == Some(p) {
+            return Action::None;
+        }
+        let l = crate::assoc::launch(p);
+        if !matches!(l, Launch::Notepad(_)) {
+            return Action::Launch(l);
+        }
+        if !self.blank() {
+            return Action::OpenTab(l);
+        }
+        (self.lines, self.status) = read(p);
+        self.path = Some(p.to_path_buf());
+        (self.cx, self.cy, self.top, self.left, self.anchor) = (0, 0, 0, 0, None);
+        Action::None
+    }
+
+    /// Columns the folder list takes, with the line after it; none with no folder open.
+    fn side(&self) -> usize {
+        if self.tree.borrow().root.is_none() {
+            return 0;
+        }
+        let w = self.size.0 as usize;
+        (w / 3).clamp(12, 30).min(w / 2) + 1
+    }
+
+    fn text_w(&self) -> usize {
+        (self.size.0 as usize).saturating_sub(self.side()).max(1)
+    }
+
+    /// A click or key on row i of the folder list.
+    fn tree_pick(&mut self, i: usize) -> Action {
+        let (dir, p) = {
+            let t = self.tree.borrow();
+            let Some(r) = t.rows.get(i) else { return Action::None };
+            (r.dir, r.path.clone())
+        };
+        if dir {
+            self.tree.borrow_mut().toggle(i);
+            Action::None
+        } else {
+            self.in_tree = false;
+            self.open_file(&p)
+        }
+    }
+
+    fn tree_key(&mut self, k: KeyEvent) -> Option<Action> {
+        let rows = self.text_rows();
+        let mut t = self.tree.borrow_mut();
+        let n = t.rows.len();
+        match k.code {
+            KeyCode::Up => t.sel = t.sel.saturating_sub(1),
+            KeyCode::Down => t.sel = (t.sel + 1).min(n.saturating_sub(1)),
+            KeyCode::PageUp => t.sel = t.sel.saturating_sub(rows),
+            KeyCode::PageDown => t.sel = (t.sel + rows).min(n.saturating_sub(1)),
+            KeyCode::Home => t.sel = 0,
+            KeyCode::End => t.sel = n.saturating_sub(1),
+            KeyCode::Right | KeyCode::Left => {
+                let i = t.sel;
+                let Some(r) = t.rows.get(i) else { return Some(Action::None) };
+                let (open, dir, depth) = (t.open.contains(&r.path), r.dir, r.depth);
+                if dir && depth > 0 && open != (k.code == KeyCode::Right) {
+                    t.toggle(i);
+                } else if k.code == KeyCode::Left && depth > 0 {
+                    // already folded: go up to the folder it's in
+                    t.sel = (0..i).rev().find(|&j| t.rows[j].depth < depth).unwrap_or(0);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => status = Some("New file".into()),
-                Err(e) => status = Some(format!("Cannot open: {e}")),
+            }
+            KeyCode::Enter => {
+                let i = t.sel;
+                drop(t);
+                return Some(self.tree_pick(i));
+            }
+            KeyCode::Esc | KeyCode::Tab => {
+                drop(t);
+                self.in_tree = false;
+                return Some(Action::None);
+            }
+            // anything else goes back to the text
+            _ => {
+                drop(t);
+                self.in_tree = false;
+                return None;
             }
         }
-        Notepad { lines, cx: 0, cy: 0, top: 0, left: 0, path, modified: false, size: (60, 18), prompt: None, status, anchor: None, last_click: None }
+        t.keep_visible(rows);
+        Some(Action::None)
+    }
+
+    fn render_tree(&self, c: &mut Canvas, th: &Theme, focused: bool) {
+        let side = self.side();
+        if side == 0 {
+            return;
+        }
+        let (w, rows) = (side as i32 - 1, self.text_rows());
+        let bg = st(th.text, th.face);
+        c.fill(0, 0, w, rows as i32, bg);
+        for y in 0..rows as i32 {
+            c.put(w, y, "│", st(th.shadow, th.face));
+        }
+        let t = self.tree.borrow();
+        for (row, (i, r)) in t.rows.iter().enumerate().skip(t.top).take(rows).enumerate() {
+            let y = row as i32;
+            let showing = self.path.as_deref() == Some(r.path.as_path());
+            let s = if i == t.sel && self.in_tree && focused { th.sel() } else if showing { st(th.text, th.client) } else { bg };
+            if s != bg {
+                c.fill(0, y, w, 1, s);
+            }
+            let arrow = if !r.dir { " " } else if t.open.contains(&r.path) { "▾" } else { "▸" };
+            let x = c.text_max(r.depth as i32 * 2, y, arrow, s, w);
+            let s = if r.dir { s.add_modifier(Modifier::BOLD) } else { s };
+            c.text_max(x + 1, y, &r.name, s, w);
+        }
     }
 
     fn text_rows(&self) -> usize {
@@ -67,7 +328,7 @@ impl Notepad {
         if self.cy >= self.top + rows {
             self.top = self.cy + 1 - rows;
         }
-        let w = self.size.0 as usize;
+        let w = self.text_w();
         if self.cx < self.left {
             self.left = self.cx;
         }
@@ -182,24 +443,27 @@ impl App for Notepad {
         (64, 18)
     }
 
-    fn render(&mut self, c: &mut Canvas, th: &Theme, _focused: bool) {
+    fn render(&mut self, c: &mut Canvas, th: &Theme, focused: bool) {
         let s = st(th.text, th.client);
         c.fill(0, 0, self.size.0 as i32, self.size.1 as i32, s);
+        self.drawn = self.tree.borrow().version;
+        self.render_tree(c, th, focused);
+        let (off, tw) = (self.side() as i32, self.text_w());
         let rows = self.text_rows();
         let sel = self.sel();
         for (i, line) in self.lines.iter().skip(self.top).take(rows).enumerate() {
-            let shown: String = line.iter().skip(self.left).take(self.size.0 as usize).map(|&ch| if ch == '\t' { ' ' } else { ch }).collect();
-            c.text_max(0, i as i32, &shown, s, self.size.0 as i32);
+            let shown: String = line.iter().skip(self.left).take(tw).map(|&ch| if ch == '\t' { ' ' } else { ch }).collect();
+            c.text_max(off, i as i32, &shown, s, off + tw as i32);
             // selected text, and a cell past the end where the line break is selected
             let li = self.top + i;
             if let Some(((y0, x0), (y1, x1))) = sel.filter(|((y0, _), (y1, _))| (*y0..=*y1).contains(&li)) {
                 let (a, b) = (if li == y0 { x0 } else { 0 }, if li == y1 { x1 } else { line.len() + 1 });
-                for ci in a.max(self.left)..b.min(self.left + self.size.0 as usize) {
+                for ci in a.max(self.left)..b.min(self.left + tw) {
                     let ch = match line.get(ci) {
                         Some('\t') | None => ' ',
                         Some(&ch) => ch,
                     };
-                    c.put_c((ci - self.left) as i32, i as i32, ch, th.sel());
+                    c.put_c(off + (ci - self.left) as i32, i as i32, ch, th.sel());
                 }
             }
         }
@@ -219,8 +483,11 @@ impl App for Notepad {
             let x = 11 + p.chars().count().min(self.size.0 as usize - 13);
             return Some((x as u16, self.size.1 - 1));
         }
+        if self.in_tree {
+            return None;
+        }
         let (x, y) = (self.cx.checked_sub(self.left)?, self.cy.checked_sub(self.top)?);
-        (x < self.size.0 as usize && y < self.text_rows()).then_some((x as u16, y as u16))
+        (x < self.text_w() && y < self.text_rows()).then_some(((x + self.side()) as u16, y as u16))
     }
 
     fn key(&mut self, k: KeyEvent) -> Action {
@@ -242,6 +509,14 @@ impl App for Notepad {
             return Action::None;
         }
         self.status = None;
+        if k.code == KeyCode::Char('e') && ctrl {
+            return self.command("tree");
+        }
+        if self.in_tree {
+            if let Some(a) = self.tree_key(k) {
+                return a;
+            }
+        }
         let rows = self.text_rows();
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let moving = matches!(k.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown);
@@ -321,6 +596,34 @@ impl App for Notepad {
     }
 
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, mods: KeyModifiers) -> Action {
+        let side = self.side() as i32;
+        if x < side && (y as usize) < self.text_rows() {
+            let rows = self.text_rows();
+            match kind {
+                MouseEventKind::Down(MouseButton::Left) if x < side - 1 => {
+                    let i = self.tree.borrow().top + y.max(0) as usize;
+                    if i < self.tree.borrow().rows.len() {
+                        self.tree.borrow_mut().sel = i;
+                        self.in_tree = true;
+                        return self.tree_pick(i);
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    let mut t = self.tree.borrow_mut();
+                    t.top = t.top.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    let mut t = self.tree.borrow_mut();
+                    t.top = (t.top + 3).min(t.rows.len().saturating_sub(rows));
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        let x = x - side;
+        if matches!(kind, MouseEventKind::Down(_)) {
+            self.in_tree = false;
+        }
         match kind {
             MouseEventKind::Down(MouseButton::Left) if self.prompt.is_none() => {
                 if y >= 0 && (y as usize) < self.text_rows() {
@@ -380,6 +683,8 @@ impl App for Notepad {
             ("File", vec![
                 Item::new("New", Cmd::App("new")).key("Ctrl+N"),
                 Item::new("Open...", Cmd::App("open")),
+                Item::new("Open Folder...", Cmd::App("openfolder")),
+                Item::new("Close Folder", Cmd::App("closefolder")).enabled(self.side() > 0),
                 Item::new("Save", Cmd::App("save")).key("Ctrl+S"),
                 Item::new("Save As...", Cmd::App("saveas")),
                 Item::sep(),
@@ -394,6 +699,7 @@ impl App for Notepad {
                 Item::new("Select All", Cmd::App("all")).key("Ctrl+A"),
                 Item::new("Time/Date", Cmd::App("date")).key("F5"),
             ]),
+            ("View", vec![Item::new("Folder List", Cmd::App("tree")).key("Ctrl+E").enabled(self.side() > 0)]),
             ("Help", vec![Item::new("About Notes", Cmd::App("about")).icon(Icon::Info)]),
         ]
     }
@@ -402,12 +708,56 @@ impl App for Notepad {
         Some(Launch::Notepad(None))
     }
 
+    /// What a picker picked: a folder for the list down the left, or a file to open.
+    fn open_more(&mut self, files: &[PathBuf]) -> Action {
+        let Some(f) = files.first() else { return Action::None };
+        if f.is_dir() {
+            self.tree.borrow_mut().set_root(f.clone());
+            self.clamp();
+            return Action::None;
+        }
+        self.open_file(f)
+    }
+
+    fn showing(&self) -> Option<PathBuf> {
+        self.path.clone()
+    }
+
+    fn tree(&self) -> Option<SharedTree> {
+        Some(self.tree.clone())
+    }
+
+    fn set_tree(&mut self, t: SharedTree) {
+        self.tree = t;
+        self.clamp();
+    }
+
+    /// Pick up files made, moved or deleted elsewhere, and changes another tab made to the list.
+    fn poll(&mut self) -> (bool, Action) {
+        let mut t = self.tree.borrow_mut();
+        if t.root.is_some() && t.read.is_none_or(|r| r.elapsed().as_secs() >= 2) {
+            t.refresh();
+        }
+        (t.version != self.drawn, Action::None)
+    }
+
     fn command(&mut self, cmd: &str) -> Action {
         match cmd {
             "new" => Action::Launch(Launch::Notepad(None)),
-            "open" => {
-                let dir = self.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(home);
-                Action::Launch(Launch::Explorer(dir))
+            "open" => Action::Pick { dir: self.here(), folder: false },
+            "openfolder" => {
+                let dir = self.tree.borrow().root.clone().and_then(|r| r.parent().map(Path::to_path_buf)).unwrap_or_else(|| self.here());
+                Action::Pick { dir, folder: true }
+            }
+            "closefolder" => {
+                self.tree.borrow_mut().close();
+                self.in_tree = false;
+                self.clamp();
+                Action::None
+            }
+            "tree" => {
+                self.in_tree = self.side() > 0 && !self.in_tree;
+                Action::None
             }
             "save" => self.save(),
             "saveas" => {
@@ -437,7 +787,7 @@ impl App for Notepad {
                 self.clamp();
                 Action::None
             }
-            "about" => Action::Launch(Launch::Msg { title: "About Notes".into(), text: "Notes\nA plain text editor.\n\nCtrl+S save, F5 inserts the time and date.\nDrag or Shift+arrows to select, Ctrl+C/X/V to copy, cut and paste.".into() }),
+            "about" => Action::Launch(Launch::Msg { title: "About Notes".into(), text: "Notes\nA plain text editor.\n\nCtrl+S save, F5 inserts the time and date.\nDrag or Shift+arrows to select, Ctrl+C/X/V to copy, cut and paste.\nFile > Open Folder shows a folder down the left; Ctrl+E moves to it and back.".into() }),
             _ => Action::None,
         }
     }
@@ -459,6 +809,35 @@ mod tests {
 
     fn key(n: &mut Notepad, code: KeyCode, m: KeyModifiers) {
         n.key(KeyEvent::new(code, m));
+    }
+
+    #[test]
+    fn folder_list_opens_files() {
+        let root = std::env::temp_dir().join(format!("win95-tree-{}", std::process::id()));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("README"), "hello\n").unwrap();
+        fs::write(root.join(".hidden"), "").unwrap();
+        let mut n = Notepad::new(None);
+        n.resize(60, 18);
+        n.open_more(std::slice::from_ref(&root));
+        let names = |n: &Notepad| n.tree.borrow().rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+        let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(names(&n), [root_name.as_str(), "src", "README"]);
+        let left = MouseEventKind::Down(MouseButton::Left);
+        // click a folder to open it out, then a file: it opens here, as this tab is empty
+        n.mouse(left, 2, 1, KeyModifiers::NONE);
+        assert_eq!(names(&n)[2], "main.rs");
+        n.mouse(left, 4, 2, KeyModifiers::NONE);
+        assert_eq!(n.showing(), Some(root.join("src/main.rs")));
+        assert_eq!(text(&n), "fn main() {}");
+        // another file now wants a tab of its own
+        assert!(matches!(n.mouse(left, 2, 3, KeyModifiers::NONE), Action::OpenTab(Launch::Notepad(Some(p))) if p == root.join("README")));
+        // the text moves over for the list, and back when the folder closes
+        assert_eq!(n.cursor(), Some((n.side() as u16, 0)));
+        n.command("closefolder");
+        assert_eq!((n.side(), n.cursor()), (0, Some((0, 0))));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
