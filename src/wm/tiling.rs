@@ -67,6 +67,7 @@ pub fn launch_key(l: &Launch) -> Option<String> {
         Launch::Notepad(_) => "Notes".into(),
         Launch::Explorer(_) => "Files".into(),
         Launch::Mines => "Mines".into(),
+        Launch::Amp(_) => "Amp".into(),
         Launch::Solitaire => "Solitaire".into(),
         Launch::Paint(_) => "Paint".into(),
         _ => return None,
@@ -449,6 +450,7 @@ impl Desktop {
         if has("lazygit") {
             v.push(item("Git", Icon::Git, Launch::shell("Git", Icon::Git, Some("lazygit"))));
         }
+        v.push(item("Amp", Icon::Amp, Launch::Amp(vec![])));
         v.push(item("Mines", Icon::Mines, Launch::Mines));
         v.push(item("Solitaire", Icon::Solitaire, Launch::Solitaire));
         for (name, cmd, icon) in &self.mine {

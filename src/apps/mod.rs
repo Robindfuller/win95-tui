@@ -1,3 +1,4 @@
+pub mod amp;
 pub mod background;
 pub mod dialogs;
 pub mod explorer;
@@ -18,6 +19,8 @@ pub enum Launch {
     Shell { cmd: Option<String>, cwd: Option<PathBuf>, title: String, icon: Icon, keep_open: bool },
     Notepad(Option<PathBuf>),
     Mines,
+    /// the music player, with files to add and play
+    Amp(Vec<PathBuf>),
     Solitaire,
     Paint(Option<PathBuf>),
     /// a file nothing in here opens, handed to the system (xdg-open)
@@ -105,4 +108,6 @@ pub trait App {
     fn new_tab(&self) -> Option<Launch> {
         None
     }
+    /// More files for a window that's already open, like the music player.
+    fn open_more(&mut self, _files: &[PathBuf]) {}
 }

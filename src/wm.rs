@@ -8,6 +8,7 @@ use crate::{
         dialogs::{about_text, AddProgram, MsgBox, Run, ShutDown, TaskList},
         explorer::Explorer,
         launcher::Launcher,
+        amp::Amp,
         mines::Mines,
         solitaire::Solitaire,
         notepad::Notepad,
@@ -364,6 +365,7 @@ impl Desktop {
             d(Icon::Terminal, "Terminal", Launch::shell("Terminal", Icon::Terminal, None)),
             d(Icon::Notepad, "Notes", Launch::Notepad(None)),
             d(Icon::Mines, "Mines", Launch::Mines),
+            d(Icon::Amp, "Amp", Launch::Amp(vec![])),
             d(Icon::Solitaire, "Solitaire", Launch::Solitaire),
             d(Icon::Paint, "Paint", Launch::Paint(None)),
         ];
@@ -633,6 +635,15 @@ impl Desktop {
             Launch::Launcher => Some("Launch"),
             _ => None,
         };
+        // there's one music player: more files go to the one that's open
+        if let Launch::Amp(files) = &l {
+            if let Some(w) = self.wins.iter_mut().find(|w| w.key == "Amp") {
+                w.app.open_more(files);
+                let id = w.id;
+                self.focus_win(id);
+                return;
+            }
+        }
         if let Some(t) = single {
             if let Some(id) = self.wins.iter().find(|w| w.title == t).map(|w| w.id) {
                 self.focus_win(id);
@@ -659,6 +670,7 @@ impl Desktop {
                 Box::new(Tabs::new(Box::new(Notepad::new(p)), &self.th))
             }
             Launch::Mines => Box::new(Mines::new()),
+            Launch::Amp(files) => Box::new(Amp::new(files)),
             Launch::Solitaire => Box::new(Solitaire::new()),
             Launch::Paint(p) => Box::new(Paint::new(p)),
             Launch::External(p) => {
@@ -805,6 +817,7 @@ impl Desktop {
         let shell = |t: &str, i: Icon, c: Option<&str>| Cmd::Launch(Launch::shell(t, i, c));
         let mut progs = vec![
             Item::new("Notes", Cmd::Launch(Launch::Notepad(None))).icon(Icon::Notepad),
+            Item::new("Amp", Cmd::Launch(Launch::Amp(vec![]))).icon(Icon::Amp),
             Item::new("Mines", Cmd::Launch(Launch::Mines)).icon(Icon::Mines),
             Item::new("Solitaire", Cmd::Launch(Launch::Solitaire)).icon(Icon::Solitaire),
             Item::new("Paint", Cmd::Launch(Launch::Paint(None))).icon(Icon::Paint),
