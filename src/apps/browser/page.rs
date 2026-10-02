@@ -61,6 +61,8 @@ pub struct Page {
     /// pictures: where from, and the size the page asks for
     pub imgs: Vec<(Src, Option<u32>, Option<u32>)>,
     pub forms: Vec<Form>,
+    /// what it looks like in a real browser, when asked for
+    pub look: Option<Box<super::chrome::Look>>,
 }
 
 impl Page {
@@ -89,7 +91,7 @@ impl Page {
 
     fn blank(url: Url, title: &str) -> Page {
         let site = host(&url);
-        Page { url, title: title.into(), site, brand: None, logo: None, nav: vec![], foot: vec![], blocks: vec![], links: vec![], imgs: vec![], forms: vec![] }
+        Page { url, title: title.into(), site, brand: None, logo: None, nav: vec![], foot: vec![], blocks: vec![], links: vec![], imgs: vec![], forms: vec![], look: None }
     }
 }
 

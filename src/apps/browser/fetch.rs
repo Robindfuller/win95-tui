@@ -33,14 +33,15 @@ pub enum Msg {
     Logo(u64, RgbaImage),
     Img(u64, usize, RgbaImage),
     Done(u64),
-    /// an AI summary, for the page with this id
-    Summary(u64, super::ai::Summary),
+    /// AI-assisted mode's version of the page with this id
+    Rebuilt(u64, super::ai::Rebuild),
 }
 
 /// Loads a page, sends it, then its logo and pictures one by one.
-pub fn load(agent: Agent, ticket: u64, req: Req, tx: Sender<Msg>) {
+/// With `look`, the page comes with what it looks like, for AI-assisted mode.
+pub fn load(agent: Agent, ticket: u64, req: Req, look: bool, tx: Sender<Msg>) {
     std::thread::spawn(move || {
-        let page = get_page(&agent, req);
+        let page = get_page(&agent, req, look);
         let logo = page.logo.clone();
         let imgs: Vec<Src> = page.imgs.iter().take(MAX_IMGS).map(|i| i.0.clone()).collect();
         if tx.send(Msg::Page(ticket, Box::new(page))).is_err() {
@@ -76,7 +77,7 @@ fn file_like(u: &Url) -> bool {
     [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".txt", ".md", ".json", ".pdf", ".zip"].iter().any(|e| p.ends_with(e))
 }
 
-fn get_page(agent: &Agent, req: Req) -> Page {
+fn get_page(agent: &Agent, req: Req, look: bool) -> Page {
     let req = match req {
         Req::Get(u) => Req::Get(plainer(u)),
         r => r,
@@ -86,8 +87,10 @@ fn get_page(agent: &Agent, req: Req) -> Page {
     };
     if let Req::Get(u) = &req {
         if matches!(u.scheme(), "http" | "https") && !file_like(u) {
-            if let Some((fin, html)) = super::chrome::get(u) {
-                return page::parse(&html, fin);
+            if let Some((fin, html, look)) = super::chrome::get(u, look) {
+                let mut p = page::parse(&html, fin);
+                p.look = look.map(Box::new);
+                return p;
             }
         }
     }
