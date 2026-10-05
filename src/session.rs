@@ -205,7 +205,16 @@ pub fn serve() -> anyhow::Result<()> {
     let mut last = Instant::now() - frame;
     let mut dirty = true;
     loop {
-        let wait = if dirty { frame.saturating_sub(last.elapsed()) } else { Duration::from_millis(25) };
+        // with nobody watching there is nothing to draw, so only wake for
+        // the apps' own timers (and never spin on a frame that can't be drawn)
+        let attached = term.backend().out.is_some();
+        let wait = if !attached {
+            Duration::from_millis(250)
+        } else if dirty {
+            frame.saturating_sub(last.elapsed())
+        } else {
+            Duration::from_millis(25)
+        };
         let mut msgs = vec![];
         match rx.recv_timeout(wait) {
             Ok(m) => msgs.push(m),
