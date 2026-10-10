@@ -1,7 +1,7 @@
 // A real terminal: a pty running a shell or program, parsed by vt100.
 use super::{Action, App};
 use crate::{draw::Canvas, icons::Icon, menu::{Cmd, Item}, theme::{home, Theme}};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use ratatui::style::{Color, Modifier, Style};
 use std::{
@@ -17,6 +17,8 @@ use std::{
 #[derive(Default)]
 pub struct Cb {
     replies: Vec<u8>,
+    /// the program's kitty keyboard flags, a stack it pushes and pops
+    kitty: Vec<u16>,
     title: Option<String>,
     fg: String,
     bg: String,
@@ -37,6 +39,30 @@ impl vt100::Callbacks for Cb {
             (None, 'n') if p0 == 5 => self.replies.extend(b"\x1b[0n"),
             (None, 'c') => self.replies.extend(b"\x1b[?62;22c"),
             (Some(b'>'), 'c') => self.replies.extend(b"\x1b[>1;10;0c"),
+            // the kitty keyboard protocol: query, push, pop and set
+            (Some(b'?'), 'u') => self.replies.extend(format!("\x1b[?{}u", self.kitty.last().copied().unwrap_or(0)).bytes()),
+            (Some(b'>'), 'u') => {
+                if self.kitty.len() >= 16 {
+                    self.kitty.remove(0);
+                }
+                self.kitty.push(p0 & 31);
+            }
+            (Some(b'<'), 'u') => {
+                let n = (p0.max(1) as usize).min(self.kitty.len());
+                self.kitty.truncate(self.kitty.len() - n);
+            }
+            (Some(b'='), 'u') => {
+                let mode = params.get(1).and_then(|p| p.first()).copied().unwrap_or(1);
+                if self.kitty.is_empty() {
+                    self.kitty.push(0);
+                }
+                let top = self.kitty.last_mut().unwrap();
+                *top = match mode {
+                    2 => *top | p0,
+                    3 => *top & !p0,
+                    _ => p0,
+                } & 31;
+            }
             _ => {}
         }
     }
@@ -166,6 +192,8 @@ pub struct TermApp {
     keep_open: bool,
     finished: bool,
     size: (u16, u16),
+    /// keys down, while the program takes key releases
+    held: Vec<KeyEvent>,
     scroll: usize,
     fg: Color,
     bg: Color,
@@ -240,6 +268,7 @@ impl TermApp {
             keep_open,
             finished: false,
             size: (80, 24),
+            held: vec![],
             scroll: 0,
             fg: th.text,
             bg: th.client,
@@ -275,6 +304,68 @@ impl TermApp {
 impl Drop for TermApp {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+/// A key in the kitty keyboard protocol, for a program that asked for it with
+/// `flags` (1 disambiguate, 2 event types, 8 every key as a code). Typed
+/// text and Enter, Tab and Backspace stay as plain bytes unless 8 is on.
+pub fn kitty_bytes(k: &KeyEvent, flags: u16, app_cursor: bool) -> Vec<u8> {
+    let events = flags & 2 != 0;
+    let all = flags & 8 != 0;
+    let ev = match k.kind {
+        KeyEventKind::Press => 1,
+        KeyEventKind::Repeat => 2,
+        KeyEventKind::Release => 3,
+    };
+    if ev == 3 && !events {
+        return vec![];
+    }
+    let m = k.modifiers;
+    let (alt, ctrl, shift, sup) = (m.contains(KeyModifiers::ALT), m.contains(KeyModifiers::CONTROL), m.contains(KeyModifiers::SHIFT), m.contains(KeyModifiers::SUPER));
+    let mods = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8 + 8 * sup as u8;
+    let csi = |num: u32, fin: char| -> Vec<u8> {
+        let tail = if events && ev > 1 {
+            format!(";{mods}:{ev}")
+        } else if mods > 1 {
+            format!(";{mods}")
+        } else {
+            String::new()
+        };
+        if tail.is_empty() && num == 1 && fin != 'u' { format!("\x1b[{fin}") } else { format!("\x1b[{num}{tail}{fin}") }.into_bytes()
+    };
+    let plain = |legacy: bool| legacy && !all && ev != 3;
+    match k.code {
+        KeyCode::Char(c) => {
+            if plain(!ctrl && !alt && !sup) {
+                return key_bytes(k, app_cursor);
+            }
+            csi(c.to_lowercase().next().unwrap_or(c) as u32, 'u')
+        }
+        KeyCode::Enter if plain(mods == 1) => b"\r".to_vec(),
+        KeyCode::Tab if plain(mods == 1) => b"\t".to_vec(),
+        KeyCode::Backspace if plain(mods == 1) => vec![0x7f],
+        KeyCode::Enter => csi(13, 'u'),
+        KeyCode::Tab | KeyCode::BackTab => csi(9, 'u'),
+        KeyCode::Backspace => csi(127, 'u'),
+        KeyCode::Esc => csi(27, 'u'),
+        KeyCode::Up => csi(1, 'A'),
+        KeyCode::Down => csi(1, 'B'),
+        KeyCode::Right => csi(1, 'C'),
+        KeyCode::Left => csi(1, 'D'),
+        KeyCode::Home => csi(1, 'H'),
+        KeyCode::End => csi(1, 'F'),
+        KeyCode::Insert => csi(2, '~'),
+        KeyCode::Delete => csi(3, '~'),
+        KeyCode::PageUp => csi(5, '~'),
+        KeyCode::PageDown => csi(6, '~'),
+        KeyCode::F(1) => csi(1, 'P'),
+        KeyCode::F(2) => csi(1, 'Q'),
+        KeyCode::F(3) => csi(13, '~'),
+        KeyCode::F(4) => csi(1, 'S'),
+        KeyCode::F(n @ 5..=12) => csi([15, 17, 18, 19, 20, 21, 23, 24][(n - 5) as usize], '~'),
+        _ if ev != 3 => key_bytes(k, app_cursor),
+        _ => vec![],
     }
 }
 
@@ -464,9 +555,38 @@ impl App for TermApp {
                 _ => {}
             }
         }
-        let app_cursor = self.parser.lock().unwrap().screen().application_cursor();
-        self.send(&key_bytes(&k, app_cursor));
+        let (app_cursor, kitty) = {
+            let p = self.parser.lock().unwrap();
+            (p.screen().application_cursor(), p.callbacks().kitty.last().copied().unwrap_or(0))
+        };
+        if kitty == 0 {
+            if k.kind != KeyEventKind::Release {
+                self.send(&key_bytes(&k, app_cursor));
+            }
+            return Action::None;
+        }
+        if kitty & 2 != 0 {
+            match k.kind {
+                KeyEventKind::Release => self.held.retain(|h| h.code != k.code),
+                _ if !self.held.iter().any(|h| h.code == k.code) => self.held.push(k),
+                _ => {}
+            }
+        }
+        self.send(&kitty_bytes(&k, kitty, app_cursor));
         Action::None
+    }
+
+    fn key_releases(&self) -> bool {
+        !self.finished && self.parser.lock().unwrap().callbacks().kitty.last().is_some_and(|f| f & 2 != 0)
+    }
+
+    /// Lets go of whatever was held, so the program doesn't keep a key down forever.
+    fn focus_lost(&mut self) {
+        let kitty = self.parser.lock().unwrap().callbacks().kitty.last().copied().unwrap_or(0);
+        for mut k in std::mem::take(&mut self.held) {
+            k.kind = KeyEventKind::Release;
+            self.send(&kitty_bytes(&k, kitty, false));
+        }
     }
 
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, mods: KeyModifiers) -> Action {
@@ -605,5 +725,57 @@ impl App for TermApp {
         let mut p = self.parser.lock().unwrap();
         p.callbacks_mut().fg = th.fg_hex.clone();
         p.callbacks_mut().bg = th.bg_hex.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+    use std::time::{Duration, Instant};
+
+    fn key(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind)
+    }
+
+    #[test]
+    fn kitty_encoding() {
+        let k = |c, kind| String::from_utf8(kitty_bytes(&key(c, kind), 11, false)).unwrap();
+        assert_eq!(k(KeyCode::Left, KeyEventKind::Press), "\x1b[D");
+        assert_eq!(k(KeyCode::Left, KeyEventKind::Release), "\x1b[1;1:3D");
+        assert_eq!(k(KeyCode::Char(' '), KeyEventKind::Press), "\x1b[32u");
+        assert_eq!(k(KeyCode::Char(' '), KeyEventKind::Release), "\x1b[32;1:3u");
+        // without event types, releases go nowhere and text stays text
+        assert!(kitty_bytes(&key(KeyCode::Left, KeyEventKind::Release), 1, false).is_empty());
+        assert_eq!(kitty_bytes(&key(KeyCode::Char('a'), KeyEventKind::Press), 1, false), b"a");
+    }
+
+    /// A program asks for key releases; the window then wants them, answers
+    /// the query, and hands the program presses and releases as kitty codes.
+    #[test]
+    fn program_gets_key_releases() {
+        let out = std::env::temp_dir().join(format!("win95-kitty-{}", std::process::id()));
+        let cmd = format!(
+            "stty raw -echo; printf '\\033[>11u'; head -c 22 > {0}; printf '\\033[<u'; sleep 0.2",
+            out.display()
+        );
+        let mut t = TermApp::new(Some(&cmd), None, "t", Icon::Terminal, false, &Theme::load()).unwrap();
+        let end = Instant::now() + Duration::from_secs(3);
+        while !t.key_releases() && Instant::now() < end {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(t.key_releases(), "never asked for releases");
+        t.key(key(KeyCode::Left, KeyEventKind::Press));
+        t.key(key(KeyCode::Left, KeyEventKind::Release));
+        t.key(key(KeyCode::Right, KeyEventKind::Press));
+        t.focus_lost();
+        let end = Instant::now() + Duration::from_secs(3);
+        while t.key_releases() && Instant::now() < end {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let got = std::fs::read_to_string(&out).unwrap_or_default();
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(got, "\x1b[D\x1b[1;1:3D\x1b[C\x1b[1;1:3C");
+        assert!(!t.key_releases(), "still on after the program popped its flags");
     }
 }

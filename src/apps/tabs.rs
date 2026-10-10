@@ -7,7 +7,7 @@ use crate::{
     menu::{Cmd, Item},
     theme::Theme,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::style::Modifier;
 use std::path::PathBuf;
 
@@ -148,6 +148,7 @@ impl App for Tabs {
     fn key(&mut self, k: KeyEvent) -> Action {
         let (ctrl, shift) = (k.modifiers.contains(KeyModifiers::CONTROL), k.modifiers.contains(KeyModifiers::SHIFT));
         match k.code {
+            _ if k.kind == KeyEventKind::Release => {}
             KeyCode::Char('t' | 'T') if ctrl && shift => return self.command("tab-new"),
             KeyCode::Char('w' | 'W') if ctrl && shift => return self.command("tab-close"),
             KeyCode::PageDown if ctrl && !shift => return self.command("tab-next"),
@@ -156,6 +157,12 @@ impl App for Tabs {
         }
         let a = self.tabs[self.cur].key(k);
         self.handle(self.cur, a)
+    }
+    fn key_releases(&self) -> bool {
+        self.tabs[self.cur].key_releases()
+    }
+    fn focus_lost(&mut self) {
+        self.tabs[self.cur].focus_lost()
     }
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, mods: KeyModifiers) -> Action {
         let off = self.strip() as i32;
