@@ -98,6 +98,17 @@ pub fn parse_run(s: &str) -> Launch {
         Some((p, a)) => (p, Some(a.trim())),
         None => (s, None),
     };
+    // a program you added under a built-in's name runs in its place
+    if crate::programs::built_in(prog).is_some() {
+        if let Some((name, cmd)) = crate::programs::load().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(prog)) {
+            let cmd = match arg {
+                Some(a) => format!("{cmd} {a}"),
+                None => cmd,
+            };
+            let icon = crate::programs::icon(&name).map(|r| crate::icons::custom(&r)).unwrap_or(Icon::Run);
+            return Launch::shell(&name, icon, Some(&cmd));
+        }
+    }
     match prog.to_lowercase().as_str() {
         "notepad" | "notes" => Launch::Notepad(arg.map(expand)),
         "mines" | "minesweeper" => Launch::Mines,
@@ -198,12 +209,16 @@ impl App for Run {
 
 // ---------------------------------------------------------------- Add Program
 
-const GRID: (i32, i32) = (12, 7);
-const SWATCH: (i32, i32) = (32, 7);
+const GRID: (i32, i32) = (12, 8);
+const SWATCH: (i32, i32) = (32, 8);
 
 /// Type a command, paint it an icon, and it joins the Apps menu and the desktop.
 pub struct AddProgram {
     cmd: String,
+    /// what it's called, if not what the command suggests
+    name: String,
+    /// typing goes into the name box rather than the command
+    on_name: bool,
     /// 6 rows of 8 palette letters, '.' for nothing
     pix: Vec<Vec<char>>,
     ink: char,
@@ -213,7 +228,19 @@ pub struct AddProgram {
 
 impl AddProgram {
     pub fn new() -> AddProgram {
-        AddProgram { cmd: String::new(), pix: vec![vec!['.'; 8]; 6], ink: PAINT[8], buttons: Buttons::new(&["Add", "Cancel"]), size: (64, 15) }
+        AddProgram {
+            cmd: String::new(),
+            name: String::new(),
+            on_name: false,
+            pix: vec![vec!['.'; 8]; 6],
+            ink: PAINT[8],
+            buttons: Buttons::new(&["Add", "Cancel"]),
+            size: (64, 16),
+        }
+    }
+
+    fn input(&mut self) -> &mut String {
+        if self.on_name { &mut self.name } else { &mut self.cmd }
     }
 
     fn rows(&self) -> Vec<String> {
@@ -225,7 +252,7 @@ impl AddProgram {
         if cmd.is_empty() {
             return Action::None;
         }
-        crate::programs::add(&cmd, Some(&self.rows()));
+        crate::programs::add(&cmd, &self.name, Some(&self.rows()));
         Action::Many(vec![Action::Refresh, Action::Close])
     }
 
@@ -248,7 +275,7 @@ impl App for AddProgram {
         Icon::Programs
     }
     fn size_hint(&self) -> (u16, u16) {
-        (64, 15)
+        (64, 16)
     }
     fn resizable(&self) -> bool {
         false
@@ -264,16 +291,25 @@ impl App for AddProgram {
         c.text(2, 1, "Type the command that starts it, and paint it an icon.", s);
         c.text(2, 3, "Command:", s);
         c.field(GRID.0, 3, w - GRID.0 - 2, &self.cmd, th);
+        c.text(2, 4, "Name:", s);
+        c.field(GRID.0, 4, w - GRID.0 - 2, &self.name, th);
         let cmd = self.cmd.trim();
+        let name = crate::programs::pick_name(cmd, &self.name);
+        if self.name.is_empty() && !cmd.is_empty() && !self.on_name {
+            c.text_max(GRID.0 + 1, 4, &name, st(th.dim, th.client), w - 3);
+        }
         let (hint, hs) = match crate::programs::missing(cmd) {
             _ if cmd.is_empty() => ("Anything you'd type in a terminal, like htop".to_string(), dim),
             Some(p) => (format!("{p} isn't installed yet: sudo pacman -S {p}"), st(th.yellow, th.face)),
-            None => (format!("Shows as {} on the Apps menu and the desktop", crate::programs::name_of(cmd)), dim),
+            None => match crate::programs::built_in(&name) {
+                Some(b) => (format!("Replaces built-in {b}; rename to keep both"), st(th.yellow, th.face)),
+                None => (format!("Shows as {name} on the Apps menu and the desktop"), dim),
+            },
         };
-        c.text_max(GRID.0, 4, &hint, hs, w - 1);
+        c.text_max(GRID.0, 5, &hint, hs, w - 1);
 
         // the painting grid: each pixel two cells wide
-        c.text(2, 6, "Icon:", s);
+        c.text(2, 7, "Icon:", s);
         c.frame(GRID.0 - 1, GRID.1 - 1, 18, 8, dim);
         let pal = palette(th);
         for (y, row) in self.pix.iter().enumerate() {
@@ -298,33 +334,32 @@ impl App for AddProgram {
         }
         let rows = self.rows();
         let refs: Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-        c.pixels(SWATCH.0 + 1, 10, &refs, &pal);
-        c.text(SWATCH.0 + 12, 10, "[ Clear ]", s);
-        c.text(SWATCH.0 + 12, 11, "right-click rubs out", dim);
+        c.pixels(SWATCH.0 + 1, SWATCH.1 + 3, &refs, &pal);
+        c.text(SWATCH.0 + 12, SWATCH.1 + 3, "[ Clear ]", s);
+        c.text(SWATCH.0 + 12, SWATCH.1 + 4, "right-click rubs out", dim);
         self.buttons.render(c, th, w, h - 1);
     }
     fn cursor(&self) -> Option<(u16, u16)> {
         let room = self.size.0 as usize - GRID.0 as usize - 4;
-        Some((GRID.0 as u16 + 1 + self.cmd.chars().count().min(room) as u16, 3))
+        let (text, y) = if self.on_name { (&self.name, 4) } else { (&self.cmd, 3) };
+        Some((GRID.0 as u16 + 1 + text.chars().count().min(room) as u16, y))
     }
     fn key(&mut self, k: KeyEvent) -> Action {
         match k.code {
             KeyCode::Esc => return Action::Close,
             KeyCode::Enter => return if self.buttons.focus == 1 { Action::Close } else { self.go() },
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.buttons.key(&k);
-            }
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => self.on_name = !self.on_name,
             KeyCode::Backspace => {
-                self.cmd.pop();
+                self.input().pop();
             }
-            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => self.cmd.clear(),
-            KeyCode::Char(ch) if !k.modifiers.contains(KeyModifiers::CONTROL) => self.cmd.push(ch),
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => self.input().clear(),
+            KeyCode::Char(ch) if !k.modifiers.contains(KeyModifiers::CONTROL) => self.input().push(ch),
             _ => {}
         }
         Action::None
     }
     fn paste(&mut self, s: &str) {
-        self.cmd.push_str(s.lines().next().unwrap_or(""));
+        self.input().push_str(s.lines().next().unwrap_or(""));
     }
     fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, _m: KeyModifiers) -> Action {
         match kind {
@@ -336,7 +371,9 @@ impl App for AddProgram {
                 let (sx, sy) = (x - SWATCH.0, y - SWATCH.1);
                 if (0..24).contains(&sx) && (0..2).contains(&sy) {
                     self.ink = PAINT[(sy * 6 + sx / 4) as usize];
-                } else if y == 10 && (SWATCH.0 + 12..SWATCH.0 + 21).contains(&x) {
+                } else if (y == 3 || y == 4) && x >= GRID.0 {
+                    self.on_name = y == 4;
+                } else if y == SWATCH.1 + 3 && (SWATCH.0 + 12..SWATCH.0 + 21).contains(&x) {
                     self.pix = vec![vec!['.'; 8]; 6];
                 } else if y == self.size.1 as i32 - 1 {
                     match self.buttons.hit(self.size.0 as i32, x) {

@@ -278,7 +278,7 @@ pub struct Desktop {
     docs: Vec<PathBuf>,
     clock: String,
     /// the programs you added: name, command, icon
-    mine: Vec<(String, String, Icon)>,
+    mine: Vec<(String, String, Option<Icon>)>,
     /// the Omarchy desktop: tiled windows, a top bar and a dock
     tiling: bool,
     cur_ws: usize,
@@ -378,7 +378,7 @@ impl Desktop {
         self.mine = crate::programs::load()
             .into_iter()
             .map(|(name, cmd)| {
-                let icon = crate::programs::icon(&name).map(|r| crate::icons::custom(&r)).unwrap_or(Icon::Run);
+                let icon = crate::programs::icon(&name).map(|r| crate::icons::custom(&r));
                 (name, cmd, icon)
             })
             .collect();
@@ -424,13 +424,29 @@ impl Desktop {
             v.push(d(Icon::Monitor, "Monitor", Launch::shell("Monitor", Icon::Monitor, Some("btop"))));
         }
         v.push(d(Icon::Folder, "Files", Launch::Explorer(home())));
-        for (name, cmd, icon) in &self.mine {
-            if !v.iter().any(|(_, l, _)| l == name) {
-                v.push(d(*icon, name, Launch::shell(name, *icon, Some(cmd))));
+        v.push(d(Icon::Recycle, "Trash", Launch::Explorer(home().join(".local/share/Trash/files"))));
+        for (icon, label, launch) in &mut v {
+            if let Some((i, l)) = self.yours(label, *icon) {
+                (*icon, *launch) = (i, l);
             }
         }
-        v.push(d(Icon::Recycle, "Trash", Launch::Explorer(home().join(".local/share/Trash/files"))));
+        let trash = v.pop().unwrap();
+        for (name, cmd, icon) in &self.mine {
+            if !v.iter().chain([&trash]).any(|(_, l, _)| l.eq_ignore_ascii_case(name)) {
+                let icon = icon.unwrap_or(Icon::Run);
+                v.push(d(icon, name, Launch::shell(name, icon, Some(cmd))));
+            }
+        }
+        v.push(trash);
         v
+    }
+
+    /// A program you added under a built-in app's name, which runs in its
+    /// place, with the built-in's icon unless you painted it one.
+    fn yours(&self, name: &str, icon: Icon) -> Option<(Icon, Launch)> {
+        let (n, cmd, i) = self.mine.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name))?;
+        let icon = i.unwrap_or(icon);
+        Some((icon, Launch::shell(n, icon, Some(cmd))))
     }
 
     fn save_icons(&self) {
@@ -970,15 +986,24 @@ impl Desktop {
         }
         progs.push(Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal));
         progs.push(Item::new("Files", Cmd::Launch(Launch::Explorer(home()))).icon(Icon::Folder));
-        // the programs you added go in with the rest
+        // the programs you added go in with the rest, or in place of a
+        // built-in one with the same name
+        let swap = |it: Item| match self.yours(&it.label, it.icon.unwrap_or(Icon::Run)) {
+            Some((i, l)) => Item { cmd: Cmd::Launch(l), icon: Some(i), ..it },
+            None => it,
+        };
+        let mut progs: Vec<Item> = progs.into_iter().map(swap).collect();
         for (name, cmd, icon) in &self.mine {
-            progs.push(Item::new(name.clone(), shell(name, *icon, Some(cmd))).icon(*icon));
+            if !progs.iter().any(|it| it.label.eq_ignore_ascii_case(name)) {
+                let icon = icon.unwrap_or(Icon::Run);
+                progs.push(Item::new(name.clone(), shell(name, icon, Some(cmd))).icon(icon));
+            }
         }
         progs.sort_by_key(|it| it.label.to_lowercase());
         progs.push(Item::sep());
         progs.push(Item::new("Add Program...", Cmd::Launch(Launch::AddProgram)).icon(Icon::Programs));
         if !self.mine.is_empty() {
-            let forget = self.mine.iter().map(|(n, _, i)| Item::new(n.clone(), Cmd::Forget(n.clone())).icon(*i)).collect();
+            let forget = self.mine.iter().map(|(n, _, i)| Item::new(n.clone(), Cmd::Forget(n.clone())).icon(i.unwrap_or(Icon::Run))).collect();
             progs.push(Item::sub("Remove Program", forget).icon(Icon::Recycle));
         }
         let docs: Vec<Item> = if self.docs.is_empty() {
@@ -990,7 +1015,7 @@ impl Desktop {
                 .map(|p| Item::new(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), Cmd::Launch(Launch::Notepad(Some(p.clone())))).icon(Icon::File))
                 .collect()
         };
-        let mut top = vec![Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal)];
+        let mut top = vec![swap(Item::new("Terminal", shell("Terminal", Icon::Terminal, None)).icon(Icon::Terminal))];
         top.extend(vec![
             Item::sep(),
             Item::sub("Programs", progs).icon(Icon::Programs),
@@ -2651,8 +2676,12 @@ mod tests {
         assert!(d.vol_open.is_none());
     }
 
+    /// the tests that point HOME somewhere else take turns
+    static HOME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn added_programs_join_the_apps_menu_and_the_desktop() {
+        let _home = HOME.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("win95-progs-{}", std::process::id()));
         unsafe { std::env::set_var("HOME", &dir) };
         let mut d = Desktop::new(120, 40);
@@ -2664,15 +2693,15 @@ mod tests {
         // paint two pixels, rub one out, paint with another colour
         let (cx, cy, _, _) = d.wins.last().unwrap().client();
         let l = MouseButton::Left;
-        m(&mut d, MouseEventKind::Down(l), cx + 12, cy + 7);
-        m(&mut d, MouseEventKind::Drag(l), cx + 14, cy + 7);
-        m(&mut d, MouseEventKind::Up(l), cx + 14, cy + 7);
-        m(&mut d, MouseEventKind::Down(MouseButton::Right), cx + 14, cy + 7);
-        m(&mut d, MouseEventKind::Up(MouseButton::Right), cx + 14, cy + 7);
-        m(&mut d, MouseEventKind::Down(l), cx + 33, cy + 7);
-        m(&mut d, MouseEventKind::Up(l), cx + 33, cy + 7);
         m(&mut d, MouseEventKind::Down(l), cx + 12, cy + 8);
-        m(&mut d, MouseEventKind::Up(l), cx + 12, cy + 8);
+        m(&mut d, MouseEventKind::Drag(l), cx + 14, cy + 8);
+        m(&mut d, MouseEventKind::Up(l), cx + 14, cy + 8);
+        m(&mut d, MouseEventKind::Down(MouseButton::Right), cx + 14, cy + 8);
+        m(&mut d, MouseEventKind::Up(MouseButton::Right), cx + 14, cy + 8);
+        m(&mut d, MouseEventKind::Down(l), cx + 33, cy + 8);
+        m(&mut d, MouseEventKind::Up(l), cx + 33, cy + 8);
+        m(&mut d, MouseEventKind::Down(l), cx + 12, cy + 9);
+        m(&mut d, MouseEventKind::Up(l), cx + 12, cy + 9);
         d.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(d.idx(id).is_none(), "the dialog closed");
         assert_eq!(crate::programs::load(), vec![("Htop".into(), "htop -t".into())]);
@@ -2763,7 +2792,7 @@ mod tests {
         d.refresh_programs();
         assert!(d.icons.iter().any(|i| i.label == "b.bmp"));
         // the same command again replaces it; Remove takes it off both
-        assert_eq!(crate::programs::add("htop", None), "Htop");
+        assert_eq!(crate::programs::add("htop", "", None), "Htop");
         assert_eq!(crate::programs::load().len(), 1);
         assert!(crate::programs::icon("Htop").is_none());
         d.exec(Cmd::Forget("Htop".into()), Owner::Start);
@@ -2772,6 +2801,52 @@ mod tests {
         assert_eq!(crate::programs::name_of("/usr/bin/scribe-tui --x"), "Scribe");
         assert_eq!(crate::programs::missing("surely-not-a-real-program --x").as_deref(), Some("surely-not-a-real-program"));
         assert_eq!(crate::programs::missing("sh -c true"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_added_program_with_a_built_in_name_takes_its_place() {
+        let _home = HOME.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("win95-clash-{}", std::process::id()));
+        unsafe { std::env::set_var("HOME", &dir) };
+        let mut d = Desktop::new(120, 40);
+        let paint = |d: &Desktop| {
+            let top = d.start_items();
+            let progs = top.iter().find(|i| i.label == "Programs").unwrap().sub.clone();
+            progs.into_iter().filter(|i| i.label.eq_ignore_ascii_case("paint")).map(|i| i.cmd).collect::<Vec<_>>()
+        };
+        assert!(matches!(paint(&d)[..], [Cmd::Launch(Launch::Paint(None))]));
+        // "paint" on its own is named Paint, and runs in place of the built-in
+        d.launch(Launch::AddProgram);
+        for c in "paint --big".chars() {
+            d.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        d.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mine = |l: &Launch| matches!(l, Launch::Shell { cmd: Some(c), .. } if c.starts_with("paint --big"));
+        assert!(matches!(&paint(&d)[..], [Cmd::Launch(l)] if mine(l)));
+        let ic = d.icons.iter().find(|i| i.label == "Paint").unwrap();
+        assert!(mine(&ic.launch) && ic.icon == Icon::Paint, "same desktop icon, the built-in's picture");
+        assert_eq!(d.desk_catalogue().iter().filter(|(_, l, _)| l == "Paint").count(), 1);
+        assert!(mine(&d.launcher_items().into_iter().find(|(n, _, _)| n == "Paint").unwrap().2));
+        assert!(mine(&parse_run("paint x.bmp")));
+        assert!(matches!(parse_run("mspaint"), Launch::Paint(None)));
+        // taking it off brings the built-in back
+        d.exec(Cmd::Forget("Paint".into()), Owner::Start);
+        assert!(matches!(paint(&d)[..], [Cmd::Launch(Launch::Paint(None))]));
+        assert!(matches!(parse_run("paint"), Launch::Paint(None)));
+        // given another name, both are there
+        d.launch(Launch::AddProgram);
+        for c in "paint --big".chars() {
+            d.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        d.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for c in "Big = Paint".chars() {
+            d.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        d.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(crate::programs::load(), vec![("Big  Paint".into(), "paint --big".into())]);
+        assert!(matches!(paint(&d)[..], [Cmd::Launch(Launch::Paint(None))]));
+        assert!(d.icons.iter().any(|i| i.label == "Big  Paint" && mine(&i.launch)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
