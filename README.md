@@ -72,8 +72,11 @@ doesn't work over SSH.
 
 Add your own with Apps > Add Program...: type the command that starts it and
 paint it an icon (click or drag to paint, right-click rubs out). It goes in
-Apps > Programs with a shortcut on the desktop, named after the command, and
-Apps > Programs > Remove Program takes it off. They're kept in
+Apps > Programs with a shortcut on the desktop, named after the command (or
+whatever you put in Name), and Apps > Programs > Remove Program takes it off.
+One with the same name as a built-in app, like Paint, runs in its place on
+the menu, the desktop, the dock and Run; give it another name to keep both.
+Removing it brings the built-in back. They're kept in
 ~/.config/win95-tui/programs (`name = command` lines) and icons/. A command
 that fails keeps its window open so you can read why.
 

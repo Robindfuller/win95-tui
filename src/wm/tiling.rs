@@ -456,8 +456,19 @@ impl Desktop {
         v.push(item("Mines", Icon::Mines, Launch::Mines));
         v.push(item("Solitaire", Icon::Solitaire, Launch::Solitaire));
         v.push(item("Doom", Icon::Doom, Launch::Doom));
+        // a program you added under a built-in's name takes its place
+        let mut v: Vec<DockItem> = v
+            .into_iter()
+            .map(|d| match self.yours(&d.label, d.icon) {
+                Some((icon, launch)) => item(&d.label, icon, launch),
+                None => d,
+            })
+            .collect();
         for (name, cmd, icon) in &self.mine {
-            v.push(item(name, *icon, Launch::shell(name, *icon, Some(cmd))));
+            if !v.iter().any(|d| d.label.eq_ignore_ascii_case(name)) {
+                let icon = icon.unwrap_or(Icon::Run);
+                v.push(item(name, icon, Launch::shell(name, icon, Some(cmd))));
+            }
         }
         // then whatever else is running
         let mut ids: Vec<&Win> = self.wins.iter().filter(|w| !w.app.dialog()).collect();

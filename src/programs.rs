@@ -47,9 +47,32 @@ pub fn icon(name: &str) -> Option<Vec<String>> {
     rows.iter().any(|r| r.chars().any(|c| c != '.')).then_some(rows)
 }
 
-/// Adds a program, or changes the one with the same name. Returns its name.
-pub fn add(cmd: &str, icon: Option<&[String]>) -> String {
-    let name = name_of(cmd);
+/// The names the built-in apps go by. A program you add under one of these
+/// takes its place; give it another name to keep both.
+pub const BUILT_IN: &[&str] = &[
+    "Amp", "Browser", "Computer", "Doom", "Files", "Home", "Media Player", "Mines", "Monitor", "Notes", "Paint", "Solitaire",
+    "Terminal", "Trash",
+];
+
+/// The built-in app a name belongs to, if any.
+pub fn built_in(name: &str) -> Option<&'static str> {
+    BUILT_IN.iter().copied().find(|b| b.eq_ignore_ascii_case(name.trim()))
+}
+
+/// The name a program goes by: the one you gave it, or else the one its
+/// command suggests. An "=" would break the file, so it's dropped.
+pub fn pick_name(cmd: &str, name: &str) -> String {
+    let name = name.replace('=', "");
+    let name = name.trim().trim_start_matches('#').trim();
+    let name = if name.is_empty() { name_of(cmd) } else { name.to_string() };
+    // spelt the way the built-in it replaces is
+    built_in(&name).map(String::from).unwrap_or(name)
+}
+
+/// Adds a program, or changes the one with the same name. With no name it
+/// goes by the one its command suggests. Returns its name.
+pub fn add(cmd: &str, name: &str, icon: Option<&[String]>) -> String {
+    let name = pick_name(cmd, name);
     let mut list = load();
     list.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
     list.push((name.clone(), cmd.to_string()));
