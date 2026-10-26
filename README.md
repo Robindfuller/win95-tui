@@ -32,6 +32,8 @@ desktop clipboard, so they go between Files windows and to or from Nautilus.
 Space or Ctrl+click picks several, Ctrl+A picks them all. A paste never
 overwrites: a clash becomes "name (copy)". This needs wl-clipboard, so it
 doesn't work over SSH.
+Del (or right-click > Delete) moves the picked files to the Trash;
+Shift+Del, or Del inside the Trash, deletes them for good after asking.
 - **Paint**: pencil, brush, eraser, fill, line and rectangle with the Windows
   95 colours; left and right click paint in two colours, Ctrl+Z undoes, and
   pictures save as .bmp. Each pixel is two cells wide so it comes out square.

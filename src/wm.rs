@@ -5,7 +5,7 @@ mod tray;
 use crate::{
     apps::{
         background::Background,
-        dialogs::{about_text, parse_run, AddProgram, MsgBox, Run, ShutDown, TaskList},
+        dialogs::{about_text, parse_run, AddProgram, Confirm, MsgBox, Run, ShutDown, TaskList},
         explorer::Explorer,
         launcher::{rank, Launcher},
         amp::Amp,
@@ -941,6 +941,14 @@ impl Desktop {
                 } else if !p.is_dir() {
                     // the window that asked has gone: open it the usual way
                     self.launch(crate::assoc::launch(&p));
+                }
+            }
+            Action::Ask { title, text, cmd } => self.add(Box::new(Confirm::new(title, text, id, cmd))),
+            Action::Command(to, cmd) => {
+                if let Some(w) = self.win(to) {
+                    let a = w.app.command(cmd);
+                    self.focus_win(to);
+                    self.apply(to, a);
                 }
             }
             Action::Menu(items, x, y) => {
