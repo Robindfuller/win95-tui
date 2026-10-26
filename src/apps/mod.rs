@@ -76,6 +76,10 @@ pub enum Action {
     Pick { dir: PathBuf, folder: bool },
     /// what a picker picked, for the window that asked
     Picked(u64, PathBuf),
+    /// ask Yes or No; Yes sends `cmd` back to this window
+    Ask { title: String, text: String, cmd: &'static str },
+    /// a command for window `to`, from a dialog it opened
+    Command(u64, &'static str),
     Many(Vec<Action>),
 }
 

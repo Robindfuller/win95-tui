@@ -31,8 +31,9 @@ pub struct Explorer {
     marked: HashSet<String>,
     /// a line for the status bar, like "Copied 2 items"
     note: Option<String>,
-    /// a paste still running: its errors arrive here when it's done
-    job: Option<Receiver<Vec<String>>>,
+    /// a paste or delete still running: its errors arrive here when it's
+    /// done, then the title for them and the note to leave
+    job: Option<(Receiver<Vec<String>>, &'static str, Option<String>)>,
     /// the folder's modified time when last read, to spot changes made elsewhere
     seen: Option<SystemTime>,
     checked: Instant,
@@ -41,6 +42,8 @@ pub struct Explorer {
     /// renaming the selected file: the name so far, the cursor, and whether
     /// the part before the extension is still selected, ready to type over
     rename: Option<(Vec<char>, usize, bool)>,
+    /// files waiting on "delete for good?"
+    doomed: Vec<PathBuf>,
 }
 
 fn human(n: u64) -> String {
@@ -159,6 +162,38 @@ fn paste_into(dir: &Path, cut: bool, paths: &[PathBuf]) -> Vec<String> {
     errs
 }
 
+/// Gone for good. A link goes, never what it points at; in a Trash folder
+/// its note in `info` goes too.
+fn delete_all(paths: &[PathBuf], info: Option<&Path>) -> Vec<String> {
+    let mut errs = vec![];
+    for p in paths {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let r = match fs::symlink_metadata(p) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(p),
+            Ok(_) => fs::remove_file(p),
+            Err(e) => Err(e),
+        };
+        match r {
+            Ok(()) => {
+                if let Some(info) = info {
+                    let _ = fs::remove_file(info.join(format!("{name}.trashinfo")));
+                }
+            }
+            Err(e) => errs.push(format!("{name}: {e}")),
+        }
+    }
+    errs
+}
+
+/// Into the Trash, where they can come back from.
+fn trash_all(paths: &[PathBuf]) -> Vec<String> {
+    match Command::new("gio").arg("trash").arg("--").args(paths).output() {
+        Ok(o) if o.status.success() => vec![],
+        Ok(o) => vec![String::from_utf8_lossy(&o.stderr).trim().to_string(), "Shift+Del deletes for good instead.".into()],
+        Err(e) => vec![format!("Couldn't run gio: {e}"), "Shift+Del deletes for good instead.".into()],
+    }
+}
+
 impl Explorer {
     pub fn new(path: PathBuf) -> Explorer {
         let mut e = Explorer {
@@ -177,6 +212,7 @@ impl Explorer {
             checked: Instant::now(),
             pick: None,
             rename: None,
+            doomed: vec![],
         };
         e.load();
         e
@@ -285,6 +321,7 @@ impl Explorer {
         };
         self.note = Some(format!("{} {}...", if cut { "Moving" } else { "Copying" }, items(v.len())));
         let (tx, rx) = channel();
+        self.job = Some((rx, "Paste", None));
         let dir = self.path.clone();
         std::thread::spawn(move || {
             let errs = paste_into(&dir, cut, &v);
@@ -293,8 +330,46 @@ impl Explorer {
             }
             let _ = tx.send(errs);
         });
-        self.job = Some(rx);
         Action::None
+    }
+
+    /// The `info` folder beside this one if this is a Trash's `files` folder.
+    fn trash_info(&self) -> Option<PathBuf> {
+        let trash = self.path.parent().filter(|_| self.path.file_name().is_some_and(|n| n == "files"))?;
+        let name = trash.file_name()?.to_string_lossy();
+        let info = trash.join("info");
+        (name == "Trash" || name.starts_with(".Trash")).then_some(info).filter(|i| i.is_dir())
+    }
+
+    /// Delete what's picked: into the Trash, or with `forever` (and always
+    /// in the Trash itself) gone for good once you say Yes.
+    fn delete(&mut self, forever: bool) -> Action {
+        let v = self.picked();
+        if v.is_empty() || self.job.is_some() || self.pick.is_some() {
+            return Action::None;
+        }
+        if forever || self.trash_info().is_some() {
+            let what = match &v[..] {
+                [one] => format!("'{}'", one.file_name().unwrap_or_default().to_string_lossy()),
+                _ => format!("these {}", items(v.len())),
+            };
+            self.doomed = v;
+            return Action::Ask { title: "Confirm Delete".into(), text: format!("Delete {what} for good?\nThis can't be undone."), cmd: "delete-now" };
+        }
+        self.start_delete(v, false);
+        Action::None
+    }
+
+    fn start_delete(&mut self, v: Vec<PathBuf>, forever: bool) {
+        let n = items(v.len());
+        self.note = Some(format!("Deleting {n}..."));
+        self.marked.clear();
+        let (tx, rx) = channel();
+        let info = self.trash_info();
+        std::thread::spawn(move || {
+            let _ = tx.send(if forever { delete_all(&v, info.as_deref()) } else { trash_all(&v) });
+        });
+        self.job = Some((rx, "Delete", Some(if forever { format!("Deleted {n}") } else { format!("Moved {n} to the Trash") })));
     }
 
     fn go(&mut self, p: PathBuf) {
@@ -546,6 +621,7 @@ impl App for Explorer {
             KeyCode::Char('o') if ctrl && self.picking_folder() => return self.command("pick-here"),
             KeyCode::Esc if self.pick.is_some() && self.marked.is_empty() => return Action::Close,
             KeyCode::F(2) => self.start_rename(),
+            KeyCode::Delete => return self.delete(shift),
             KeyCode::Char('c') | KeyCode::Insert if ctrl => return self.copy(false),
             KeyCode::Char('x') if ctrl => return self.copy(true),
             KeyCode::Char('v') if ctrl => return self.paste_files(None),
@@ -641,6 +717,7 @@ impl App for Explorer {
                             Item::new("Cut", Cmd::App("cut")).key("Ctrl+X"),
                             Item::new("Copy", Cmd::App("copy")).key("Ctrl+C"),
                             Item::sep(),
+                            Item::new("Delete", Cmd::App("delete")).key("Del").enabled(self.pick.is_none()),
                             Item::new("Rename", Cmd::App("rename")).key("F2").enabled(self.pick.is_none()),
                         ],
                         x,
@@ -692,13 +769,14 @@ impl App for Explorer {
     }
 
     fn poll(&mut self) -> (bool, Action) {
-        if let Some(rx) = &self.job {
+        if let Some((rx, title, done)) = &self.job {
             if let Ok(errs) = rx.try_recv() {
+                let (title, done) = (*title, done.clone());
                 self.job = None;
-                self.note = None;
+                self.note = done.filter(|_| errs.is_empty());
                 self.reload();
                 if !errs.is_empty() {
-                    return (true, Action::Launch(Launch::Msg { title: "Paste".into(), text: errs.join("\n") }));
+                    return (true, Action::Launch(Launch::Msg { title: title.into(), text: errs.join("\n") }));
                 }
                 return (true, Action::None);
             }
@@ -734,6 +812,7 @@ impl App for Explorer {
         vec![
             ("File", vec![
                 Item::new("Open", Cmd::App("open")).key("Enter"),
+                Item::new("Delete", Cmd::App("delete")).key("Del"),
                 Item::new("Rename", Cmd::App("rename")).key("F2"),
                 Item::new("Terminal Here", Cmd::App("term")).icon(Icon::Terminal),
                 Item::new("New Text Document", Cmd::App("newtxt")).icon(Icon::Notepad),
@@ -769,6 +848,13 @@ impl App for Explorer {
         match cmd {
             "open" => return self.open(),
             "rename" => self.start_rename(),
+            "delete" => return self.delete(false),
+            "delete-now" => {
+                let v = std::mem::take(&mut self.doomed);
+                if !v.is_empty() && self.job.is_none() {
+                    self.start_delete(v, true);
+                }
+            }
             "pick-here" => return self.hand_back(self.path.clone()),
             "opentab" => {
                 if let Some(e) = self.entries.get(self.sel).filter(|e| e.dir && e.name != "..") {
@@ -901,6 +987,48 @@ mod tests {
 
         assert!(paste_into(&b, true, &[a.join("note.txt")]).is_empty());
         assert!(!a.join("note.txt").exists() && b.join("note (copy 2).txt").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn delete_asks_before_going_for_good() {
+        let root = std::env::temp_dir().join(format!("win95-delete-{}", std::process::id()));
+        let (files, info) = (root.join("Trash/files"), root.join("Trash/info"));
+        fs::create_dir_all(files.join("old folder")).unwrap();
+        fs::create_dir_all(&info).unwrap();
+        fs::write(files.join("old folder/inner"), "x").unwrap();
+        fs::write(files.join("a.txt"), "hi").unwrap();
+        fs::write(info.join("a.txt.trashinfo"), "[Trash Info]").unwrap();
+        fs::write(root.join("keep.txt"), "keep").unwrap();
+        std::os::unix::fs::symlink(root.join("keep.txt"), files.join("link")).unwrap();
+
+        let wait = |e: &mut Explorer| {
+            while e.job.is_some() {
+                e.poll();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        // in the Trash, Del asks, and No leaves it be
+        let mut e = Explorer::new(files.clone());
+        e.sel = e.entries.iter().position(|x| x.name == "a.txt").unwrap();
+        assert!(matches!(e.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)), Action::Ask { cmd: "delete-now", .. }));
+        assert!(files.join("a.txt").exists());
+        // Yes deletes it and its note
+        e.command("delete-now");
+        wait(&mut e);
+        assert!(!files.join("a.txt").exists() && !info.join("a.txt.trashinfo").exists());
+        assert_eq!(e.note.as_deref(), Some("Deleted 1 item"));
+
+        // Shift+Del on several, a folder and a link: the link goes, not what it points at
+        e.command("all");
+        assert!(matches!(e.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::SHIFT)), Action::Ask { .. }));
+        e.command("delete-now");
+        wait(&mut e);
+        assert!(fs::read_dir(&files).unwrap().next().is_none());
+        assert_eq!(fs::read_to_string(root.join("keep.txt")).unwrap(), "keep");
+        // nothing waiting, so a stray Yes does nothing
+        e.command("delete-now");
+        assert!(e.job.is_none());
         fs::remove_dir_all(&root).unwrap();
     }
 }

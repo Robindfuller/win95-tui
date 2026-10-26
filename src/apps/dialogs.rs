@@ -452,6 +452,82 @@ impl App for MsgBox {
     }
 }
 
+// ---------------------------------------------------------------- Yes or No
+
+/// A question for window `to`: Yes sends it `cmd`.
+pub struct Confirm {
+    title: String,
+    lines: Vec<String>,
+    size: (u16, u16),
+    buttons: Buttons,
+    to: u64,
+    cmd: &'static str,
+}
+
+impl Confirm {
+    pub fn new(title: String, text: String, to: u64, cmd: &'static str) -> Confirm {
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        Confirm { title, lines, size: (0, 0), buttons: Buttons::new(&["Yes", "No"]), to, cmd }
+    }
+    fn answer(&self, yes: bool) -> Action {
+        if yes {
+            Action::Many(vec![Action::Close, Action::Command(self.to, self.cmd)])
+        } else {
+            Action::Close
+        }
+    }
+}
+
+impl App for Confirm {
+    fn title(&self) -> String {
+        self.title.clone()
+    }
+    fn icon(&self) -> Icon {
+        Icon::Recycle
+    }
+    fn size_hint(&self) -> (u16, u16) {
+        let w = self.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) + 16;
+        (w.clamp(34, 90) as u16, (self.lines.len() + 4).max(6) as u16)
+    }
+    fn resizable(&self) -> bool {
+        false
+    }
+    fn dialog(&self) -> bool {
+        true
+    }
+    fn render(&mut self, c: &mut Canvas, th: &Theme, _f: bool) {
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let s = st(th.text, th.face);
+        c.fill(0, 0, w, h, s);
+        icon_art(c, th, 2, 1, Icon::Recycle);
+        for (i, l) in self.lines.iter().enumerate() {
+            c.text_max(12, 1 + i as i32, l, s, w - 1);
+        }
+        self.buttons.render(c, th, w, h - 1);
+    }
+    fn key(&mut self, k: KeyEvent) -> Action {
+        match k.code {
+            KeyCode::Char('y' | 'Y') => self.answer(true),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer(false),
+            _ => match self.buttons.key(&k) {
+                Some(i) => self.answer(i == 0),
+                None => Action::None,
+            },
+        }
+    }
+    fn mouse(&mut self, kind: MouseEventKind, x: i32, y: i32, _m: KeyModifiers) -> Action {
+        if matches!(kind, MouseEventKind::Down(MouseButton::Left)) && y == self.size.1 as i32 - 1 {
+            if let Some(i) = self.buttons.hit(self.size.0 as i32, x) {
+                return self.answer(i == 0);
+            }
+        }
+        Action::None
+    }
+    fn resize(&mut self, w: u16, h: u16) {
+        self.size = (w, h);
+    }
+}
+
 // ---------------------------------------------------------------- About
 
 pub fn about_text(th: &Theme) -> String {
